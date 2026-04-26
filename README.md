@@ -45,6 +45,14 @@ Hello, world
 
 ## Quick start
 
+Install the tool using cargo:
+
+```sh
+cargo install --locked mii-http
+```
+
+or, alternatively...
+
 Build the binary:
 
 ```sh
@@ -66,8 +74,8 @@ Exec: echo Hello, [%name]
 Validate it, then run it:
 
 ```sh
-./target/release/mii-http --check hello.http
-./target/release/mii-http --addr 127.0.0.1:8080 hello.http
+mii-http --check hello.http
+mii-http --addr 127.0.0.1:8080 hello.http
 ```
 
 Try it out:
