@@ -1,0 +1,119 @@
+   Compiling mii-http v0.1.0 (/home/nipah/dev/mii-http)
+error[E0583]: file not found for module `server`
+ --> src/lib.rs:8:1
+  |
+8 | pub mod server;
+  | ^^^^^^^^^^^^^^^
+  |
+  = help: to create the module `server`, create file "src/server.rs" or "src/server/mod.rs"
+  = note: if there is a `mod server` elsewhere in the crate already, import it with `use crate::...` instead
+
+error[E0599]: the method `insert` exists for struct `HashSet<(spec::Method, std::string::String)>`, but its trait bounds were not satisfied
+  --> src/check.rs:14:18
+   |
+14 |         if !seen.insert(key) {
+   |                  ^^^^^^
+   |
+  ::: src/spec.rs:53:1
+   |
+53 | pub enum Method {
+   | --------------- doesn't satisfy `spec::Method: Hash`
+   |
+   = note: the following trait bounds were not satisfied:
+           `spec::Method: Hash`
+           which is required by `(spec::Method, std::string::String): Hash`
+help: consider annotating `spec::Method` with `#[derive(Hash)]`
+  --> src/spec.rs:53:1
+   |
+53 + #[derive(Hash)]
+54 | pub enum Method {
+   |
+
+error[E0277]: the trait bound `&str: ariadne::Span` is not satisfied
+   --> src/diag.rs:54:47
+    |
+ 54 |         let mut builder = Report::build(kind, file_name, span.start)
+    |                           -------------       ^^^^^^^^^ the trait `ariadne::Span` is not implemented for `&str`
+    |                           |
+    |                           required by a bound introduced by this call
+    |
+help: the following other types implement trait `ariadne::Span`
+   --> /home/nipah/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ariadne-0.6.0/src/lib.rs:65:1
+    |
+ 65 | impl Span for Range<usize> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^ `std::ops::Range<usize>`
+...
+ 79 | impl<Id: fmt::Debug + Hash + PartialEq + Eq + ToOwned> Span for (Id, Range<usize>) {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(Id, std::ops::Range<usize>)`
+...
+ 93 | impl Span for RangeInclusive<usize> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `std::ops::RangeInclusive<usize>`
+...
+107 | impl<Id: fmt::Debug + Hash + PartialEq + Eq + ToOwned> Span for (Id, RangeInclusive<usize>) {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(Id, std::ops::RangeInclusive<usize>)`
+note: required by a bound in `ariadne::Report::<'_, S>::build`
+   --> /home/nipah/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ariadne-0.6.0/src/lib.rs:212:9
+    |
+212 | impl<S: Span> Report<'_, S> {
+    |         ^^^^ required by this bound in `Report::<'_, S>::build`
+...
+216 |     pub fn build(kind: ReportKind, span: S) -> ReportBuilder<S> {
+    |            ----- required by a bound in this associated function
+
+error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+   --> src/diag.rs:54:27
+    |
+ 54 |         let mut builder = Report::build(kind, file_name, span.start)
+    |                           ^^^^^^^^^^^^^                  ---------- unexpected argument #3 of type `usize`
+    |
+note: associated function defined here
+   --> /home/nipah/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ariadne-0.6.0/src/lib.rs:216:12
+    |
+216 |     pub fn build(kind: ReportKind, span: S) -> ReportBuilder<S> {
+    |            ^^^^^
+help: remove the extra argument
+    |
+ 54 -         let mut builder = Report::build(kind, file_name, span.start)
+ 54 +         let mut builder = Report::build(kind, file_name)
+    |
+
+error[E0599]: the method `with_message` exists for struct `ReportBuilder<'_, &str>`, but its trait bounds were not satisfied
+  --> src/diag.rs:55:14
+   |
+54 |           let mut builder = Report::build(kind, file_name, span.start)
+   |  ___________________________-
+55 | |             .with_message(&self.message)
+   | |_____________-^^^^^^^^^^^^
+   |
+   = note: the following trait bounds were not satisfied:
+           `&str: ariadne::Span`
+
+error[E0277]: the trait bound `&str: ariadne::Span` is not satisfied
+   --> src/diag.rs:54:27
+    |
+ 54 |         let mut builder = Report::build(kind, file_name, span.start)
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `ariadne::Span` is not implemented for `&str`
+    |
+help: the following other types implement trait `ariadne::Span`
+   --> /home/nipah/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ariadne-0.6.0/src/lib.rs:65:1
+    |
+ 65 | impl Span for Range<usize> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^ `std::ops::Range<usize>`
+...
+ 79 | impl<Id: fmt::Debug + Hash + PartialEq + Eq + ToOwned> Span for (Id, Range<usize>) {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(Id, std::ops::Range<usize>)`
+...
+ 93 | impl Span for RangeInclusive<usize> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `std::ops::RangeInclusive<usize>`
+...
+107 | impl<Id: fmt::Debug + Hash + PartialEq + Eq + ToOwned> Span for (Id, RangeInclusive<usize>) {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(Id, std::ops::RangeInclusive<usize>)`
+note: required by a bound in `ReportBuilder`
+   --> /home/nipah/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ariadne-0.6.0/src/lib.rs:282:33
+    |
+282 | pub struct ReportBuilder<'a, S: Span> {
+    |                                 ^^^^ required by this bound in `ReportBuilder`
+
+Some errors have detailed explanations: E0061, E0277, E0583, E0599.
+For more information about an error, try `rustc --explain E0061`.
+error: could not compile `mii-http` (lib) due to 6 previous errors

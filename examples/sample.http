@@ -1,0 +1,55 @@
+# Sample mii-http specs file used for smoke testing.
+
+VERSION 1
+BASE /named
+MAX_BODY_SIZE 1mb
+MAX_QUERY_PARAM_SIZE 100
+MAX_HEADER_SIZE 200
+TIMEOUT 5s
+
+GET /status
+Response-Type text/plain
+Exec: echo ok
+
+GET /greet
+Response-Type text/plain
+QUERY name: /[a-zA-Z0-9_]+/
+QUERY guest?: /[a-zA-Z0-9_]+/
+Exec: echo Hello, [%name] [%guest]
+
+POST /echo
+Response-Type text/plain
+BODY string
+Exec: $ | xargs echo
+
+GET /users/:user_id:uuid
+Response-Type text/plain
+Exec: echo user [:user_id]
+
+POST /submit-form
+Response-Type text/plain
+BODY form {
+  username: /[a-zA-Z0-9_]+/
+  age?: int(0..150)
+}
+Exec: echo username=[$.username] age=[$.age]
+
+POST /submit-json
+Response-Type application/json
+BODY json {
+  title: /[a-zA-Z0-9_ ]+/
+  count?: int
+}
+Exec: echo title=[$.title] count=[$.count]
+
+GET /headers
+Response-Type text/plain
+HEADER X-Custom-Header: /[a-zA-Z0-9_]+/
+HEADER X-Optional-Header?: /[a-zA-Z0-9_]+/
+Exec: echo X={^X-Custom-Header} O={^X-Optional-Header}
+
+GET /echovar
+Response-Type text/plain
+VAR greeting [ENV GREETING]
+Exec: echo [@greeting] [%name]
+QUERY name?: /[a-zA-Z0-9_]+/
