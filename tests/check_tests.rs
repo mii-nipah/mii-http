@@ -244,8 +244,9 @@ Exec: echo [%a]
 "#,
     );
     assert!(
-        warns.iter().any(|d| d.message.contains("permissive")
-            || d.message.contains("`.*`")),
+        warns
+            .iter()
+            .any(|d| d.message.contains("permissive") || d.message.contains("`.*`")),
         "expected permissive regex warning, got {:?}",
         warns
     );
@@ -261,7 +262,9 @@ Exec: $ | xargs echo
 "#,
     );
     assert!(
-        warns.iter().any(|d| d.message.to_lowercase().contains("get")),
+        warns
+            .iter()
+            .any(|d| d.message.to_lowercase().contains("get")),
         "expected GET-with-body warning, got {:?}",
         warns
     );

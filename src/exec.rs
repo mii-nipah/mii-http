@@ -178,7 +178,11 @@ pub fn preview_pipeline(pipeline: &[ExecStage], ctx: &ExecContext) -> Vec<String
                         }
                     })
                     .unwrap_or_else(|| "<unresolved>".into());
-                out.push(format!("stdin <- {} = {:?}", reference.describe(), resolved));
+                out.push(format!(
+                    "stdin <- {} = {:?}",
+                    reference.describe(),
+                    resolved
+                ));
             }
             ExecStage::Command { tokens, .. } => {
                 let argv = build_argv(tokens, ctx);
@@ -247,9 +251,8 @@ async fn run_pipeline_inner(
                 let stdin_data: Option<Vec<u8>>;
                 if let Some(mut prev) = prev_child.take() {
                     if let Some(out) = prev.stdout.take() {
-                        let std_out: std::process::Stdio = out
-                            .try_into()
-                            .map_err(|e: std::io::Error| e.to_string())?;
+                        let std_out: std::process::Stdio =
+                            out.try_into().map_err(|e: std::io::Error| e.to_string())?;
                         cmd.stdin(std_out);
                     } else {
                         cmd.stdin(Stdio::null());

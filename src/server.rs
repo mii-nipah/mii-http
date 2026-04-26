@@ -44,7 +44,10 @@ pub async fn serve(spec: Spec, addr: SocketAddr, dry_run: bool) -> std::io::Resu
     let router = build_router(state.clone());
     let listener = TcpListener::bind(addr).await?;
     if dry_run {
-        tracing::info!("mii-http listening on {} (dry-run: commands will not be executed)", addr);
+        tracing::info!(
+            "mii-http listening on {} (dry-run: commands will not be executed)",
+            addr
+        );
     } else {
         tracing::info!("mii-http listening on {}", addr);
     }
@@ -55,9 +58,8 @@ pub async fn serve(spec: Spec, addr: SocketAddr, dry_run: bool) -> std::io::Resu
 
 fn resolve_static_source(src: &ValueSource) -> std::io::Result<String> {
     match src {
-        ValueSource::Env { name, .. } => std::env::var(name).map_err(|_| {
-            std::io::Error::other(format!("env var `{}` not set", name))
-        }),
+        ValueSource::Env { name, .. } => std::env::var(name)
+            .map_err(|_| std::io::Error::other(format!("env var `{}` not set", name))),
         ValueSource::Literal { value, .. } => Ok(value.clone()),
         ValueSource::Header { .. } => Err(std::io::Error::other(
             "[HEADER ...] is not valid for static setup values",
@@ -73,7 +75,9 @@ fn build_router(state: AppState) -> Router {
     for (idx, ep) in state.spec.endpoints.iter().enumerate() {
         let path = format!("{}{}", prefix, axum_path(&ep.path_segments));
         tracing::debug!(method = ep.method.as_str(), path = %path, "server::build_router: mounting route");
-        let entry = routes.entry(path).or_insert_with(MethodRouter::<AppState>::new);
+        let entry = routes
+            .entry(path)
+            .or_insert_with(MethodRouter::<AppState>::new);
         let idx_clone = idx;
         let mr = MethodRouter::<AppState>::new().on(
             method_filter(ep.method),
@@ -125,11 +129,7 @@ fn axum_path(segs: &[PathSegment]) -> String {
             }
         }
     }
-    if out.is_empty() {
-        "/".into()
-    } else {
-        out
-    }
+    if out.is_empty() { "/".into() } else { out }
 }
 
 async fn handle(
@@ -228,9 +228,9 @@ async fn handle_inner(
     let mut resp = Response::new(stdout.into());
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
-        content_type.parse().unwrap_or_else(|_| {
-            header::HeaderValue::from_static("text/plain; charset=utf-8")
-        }),
+        content_type
+            .parse()
+            .unwrap_or_else(|_| header::HeaderValue::from_static("text/plain; charset=utf-8")),
     );
     Ok(resp)
 }
@@ -298,10 +298,16 @@ fn validate_query(
             format!("missing query parameter `{}`", f.name)
         })?;
         if let Some(v) = v {
-            enforce_size(v.len(), setup.max_query_param_size, StatusCode::URI_TOO_LONG, || {
-                format!("query param `{}` exceeds max size", f.name)
-            })?;
-            check_validation(value::validate_text(&v, &f.ty), &format!("query `{}`", f.name))?;
+            enforce_size(
+                v.len(),
+                setup.max_query_param_size,
+                StatusCode::URI_TOO_LONG,
+                || format!("query param `{}` exceeds max size", f.name),
+            )?;
+            check_validation(
+                value::validate_text(&v, &f.ty),
+                &format!("query `{}`", f.name),
+            )?;
             out.insert(f.name.clone(), v);
         }
     }
@@ -326,7 +332,10 @@ fn validate_headers(
                 StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
                 || format!("header `{}` exceeds max size", f.name),
             )?;
-            check_validation(value::validate_text(&v, &f.ty), &format!("header `{}`", f.name))?;
+            check_validation(
+                value::validate_text(&v, &f.ty),
+                &format!("header `{}`", f.name),
+            )?;
             out.insert(f.name.clone(), v);
         }
     }
@@ -342,7 +351,10 @@ fn validate_path(
     for seg in &ep.path_segments {
         if let PathSegment::Param { name, ty, .. } = seg {
             let v = path.get(name).cloned().ok_or_else(|| {
-                HandlerError::new(StatusCode::BAD_REQUEST, format!("missing path param `{}`", name))
+                HandlerError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!("missing path param `{}`", name),
+                )
             })?;
             check_validation(value::validate_text(&v, ty), &format!("path `{}`", name))?;
             out.insert(name.clone(), v);
@@ -369,10 +381,11 @@ fn build_body(ep: &Endpoint, body: Bytes) -> Result<BodyValue, HandlerError> {
     tracing::debug!(endpoint = %ep.path, body_len = body.len(), "server::build_body");
     Ok(match &ep.body {
         None => BodyValue::None,
-        Some(BodySpec::String { .. }) => BodyValue::Text(
-            String::from_utf8(body.to_vec())
-                .map_err(|_| HandlerError::new(StatusCode::BAD_REQUEST, "body is not valid UTF-8"))?,
-        ),
+        Some(BodySpec::String { .. }) => {
+            BodyValue::Text(String::from_utf8(body.to_vec()).map_err(|_| {
+                HandlerError::new(StatusCode::BAD_REQUEST, "body is not valid UTF-8")
+            })?)
+        }
         Some(BodySpec::Binary { .. }) => BodyValue::Binary(body),
         Some(BodySpec::Json { schema, .. }) => {
             let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
@@ -411,7 +424,10 @@ fn header_get(headers: &HeaderMap, name: &str) -> Option<String> {
 
 fn extract_bearer(headers: &HeaderMap, header_name: &str) -> Result<String, HandlerError> {
     let raw = header_get(headers, header_name).ok_or_else(|| {
-        HandlerError::new(StatusCode::UNAUTHORIZED, format!("missing `{}`", header_name))
+        HandlerError::new(
+            StatusCode::UNAUTHORIZED,
+            format!("missing `{}`", header_name),
+        )
     })?;
     let token = raw
         .strip_prefix("Bearer ")
@@ -464,8 +480,9 @@ fn resolve_runtime_source(src: &ValueSource, headers: &HeaderMap) -> Result<Stri
         ValueSource::Env { name, .. } => {
             std::env::var(name).map_err(|_| format!("env var `{}` not set", name))
         }
-        ValueSource::Header { name, .. } => header_get(headers, name)
-            .ok_or_else(|| format!("header `{}` not present", name)),
+        ValueSource::Header { name, .. } => {
+            header_get(headers, name).ok_or_else(|| format!("header `{}` not present", name))
+        }
         ValueSource::Literal { value, .. } => Ok(value.clone()),
     }
 }
@@ -500,4 +517,3 @@ fn error_response(status: StatusCode, msg: &str) -> Response {
     );
     resp
 }
-

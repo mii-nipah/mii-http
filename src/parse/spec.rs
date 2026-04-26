@@ -25,7 +25,11 @@ pub fn parse(source: &str) -> ParseResult {
     let spec = p.parse_spec();
     let diag_count = p.diags.len();
     let endpoint_count = spec.as_ref().map(|s| s.endpoints.len()).unwrap_or(0);
-    tracing::debug!(endpoints = endpoint_count, diags = diag_count, "parse::parse done");
+    tracing::debug!(
+        endpoints = endpoint_count,
+        diags = diag_count,
+        "parse::parse done"
+    );
     ParseResult {
         spec,
         diags: p.diags,
@@ -116,10 +120,7 @@ impl<'a> Parser<'a> {
             };
             let trimmed = text.trim_start();
             // detect endpoint method line
-            let upper_first = trimmed
-                .split_whitespace()
-                .next()
-                .unwrap_or("");
+            let upper_first = trimmed.split_whitespace().next().unwrap_or("");
             if matches!(upper_first, "GET" | "POST" | "PUT" | "DELETE" | "PATCH") {
                 break;
             }
@@ -171,11 +172,19 @@ impl<'a> Parser<'a> {
             },
             "MAX_BODY_SIZE" => match parse_size(value) {
                 Some(n) => setup.max_body_size = Some(n),
-                None => self.err("invalid MAX_BODY_SIZE", value_span, "expected e.g. 1mb, 512kb, 1024"),
+                None => self.err(
+                    "invalid MAX_BODY_SIZE",
+                    value_span,
+                    "expected e.g. 1mb, 512kb, 1024",
+                ),
             },
             "MAX_QUERY_PARAM_SIZE" => match value.parse::<u64>() {
                 Ok(n) => setup.max_query_param_size = Some(n),
-                Err(_) => self.err("invalid MAX_QUERY_PARAM_SIZE", value_span, "expected integer"),
+                Err(_) => self.err(
+                    "invalid MAX_QUERY_PARAM_SIZE",
+                    value_span,
+                    "expected integer",
+                ),
             },
             "MAX_HEADER_SIZE" => match value.parse::<u64>() {
                 Ok(n) => setup.max_header_size = Some(n),
@@ -183,7 +192,11 @@ impl<'a> Parser<'a> {
             },
             "TIMEOUT" => match parse_duration_ms(value) {
                 Some(n) => setup.timeout_ms = Some(n),
-                None => self.err("invalid TIMEOUT", value_span, "expected e.g. 30s, 500ms, 1m"),
+                None => self.err(
+                    "invalid TIMEOUT",
+                    value_span,
+                    "expected e.g. 30s, 500ms, 1m",
+                ),
             },
             other => {
                 self.err(
@@ -483,11 +496,15 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_form_block(&mut self) -> Vec<NamedField> {
-        self.parse_brace_block("BODY form", |this, val, off| this.parse_named_field(val, off))
+        self.parse_brace_block("BODY form", |this, val, off| {
+            this.parse_named_field(val, off)
+        })
     }
 
     fn parse_json_block(&mut self) -> Vec<JsonField> {
-        self.parse_brace_block("BODY json", |this, val, off| this.parse_json_field(val, off))
+        self.parse_brace_block("BODY json", |this, val, off| {
+            this.parse_json_field(val, off)
+        })
     }
 
     /// Generic `{ ... }` block parser used by `BODY form` and `BODY json`.
@@ -523,7 +540,10 @@ impl<'a> Parser<'a> {
 
     fn parse_json_field(&mut self, value: &str, offset: usize) -> Result<JsonField, Diag> {
         let head = split_field_head(value, offset)?;
-        let ty = if let Some(inner) = head.tail.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+        let ty = if let Some(inner) = head
+            .tail
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
         {
             JsonFieldType::Array(parse_type_expr(inner.trim(), head.tail_off + 1)?)
         } else {
@@ -582,9 +602,7 @@ fn split_field_head(value: &str, offset: usize) -> Result<FieldHead<'_>, Diag> {
 
 fn split_first_word(s: &str) -> (&str, &str) {
     let s = s.trim_start();
-    let end = s
-        .find(|c: char| c.is_whitespace())
-        .unwrap_or(s.len());
+    let end = s.find(|c: char| c.is_whitespace()).unwrap_or(s.len());
     (&s[..end], &s[end..])
 }
 
@@ -667,7 +685,16 @@ fn parse_auth(value: &str, offset: usize) -> Result<AuthSpec, Diag> {
 }
 
 fn parse_size(s: &str) -> Option<u64> {
-    parse_suffixed(s, &[("kb", 1024), ("mb", 1024 * 1024), ("gb", 1024 * 1024 * 1024), ("b", 1)], 1)
+    parse_suffixed(
+        s,
+        &[
+            ("kb", 1024),
+            ("mb", 1024 * 1024),
+            ("gb", 1024 * 1024 * 1024),
+            ("b", 1),
+        ],
+        1,
+    )
 }
 
 fn parse_duration_ms(s: &str) -> Option<u64> {
@@ -715,7 +742,10 @@ pub fn parse_type_expr(s: &str, offset: usize) -> Result<TypeExpr, Diag> {
         if let Some(inner) = rest.strip_suffix(')') {
             let parts: Vec<&str> = inner.splitn(2, "..").collect();
             if parts.len() == 2 {
-                if let (Ok(a), Ok(b)) = (parts[0].trim().parse::<i64>(), parts[1].trim().parse::<i64>()) {
+                if let (Ok(a), Ok(b)) = (
+                    parts[0].trim().parse::<i64>(),
+                    parts[1].trim().parse::<i64>(),
+                ) {
                     return Ok(TypeExpr::IntRange {
                         min: a,
                         max: b,
@@ -734,7 +764,10 @@ pub fn parse_type_expr(s: &str, offset: usize) -> Result<TypeExpr, Diag> {
         if let Some(inner) = rest.strip_suffix(')') {
             let parts: Vec<&str> = inner.splitn(2, "..").collect();
             if parts.len() == 2 {
-                if let (Ok(a), Ok(b)) = (parts[0].trim().parse::<f64>(), parts[1].trim().parse::<f64>()) {
+                if let (Ok(a), Ok(b)) = (
+                    parts[0].trim().parse::<f64>(),
+                    parts[1].trim().parse::<f64>(),
+                ) {
                     return Ok(TypeExpr::FloatRange {
                         min: a,
                         max: b,

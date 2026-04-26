@@ -137,11 +137,18 @@ Exec: echo [%age] [%mode]
     let by_name = |n: &str| ep.query_params.iter().find(|f| f.name == n).unwrap();
     assert!(matches!(
         by_name("age").ty,
-        TypeExpr::IntRange { min: 0, max: 150, .. }
+        TypeExpr::IntRange {
+            min: 0,
+            max: 150,
+            ..
+        }
     ));
     match &by_name("mode").ty {
         TypeExpr::Union { variants, .. } => {
-            assert_eq!(variants, &vec!["on".to_string(), "off".into(), "auto".into()]);
+            assert_eq!(
+                variants,
+                &vec!["on".to_string(), "off".into(), "auto".into()]
+            );
         }
         other => panic!("expected union, got {:?}", other),
     }
@@ -185,7 +192,10 @@ Exec: echo [$.title]
     );
     let ep = &s.endpoints[0];
     match &ep.body {
-        Some(BodySpec::Json { schema: Some(schema), .. }) => {
+        Some(BodySpec::Json {
+            schema: Some(schema),
+            ..
+        }) => {
             assert_eq!(schema.fields.len(), 3);
             assert!(matches!(schema.fields[2].ty, JsonFieldType::Array(_)));
         }
@@ -195,15 +205,8 @@ Exec: echo [$.title]
 
 #[test]
 fn parses_string_and_binary_and_unschematized_json_body() {
-    for (kind, expected) in &[
-        ("string", "string"),
-        ("binary", "binary"),
-        ("json", "json"),
-    ] {
-        let src = format!(
-            "POST /e\nBODY {}\nExec: echo ok\n",
-            kind
-        );
+    for (kind, expected) in &[("string", "string"), ("binary", "binary"), ("json", "json")] {
+        let src = format!("POST /e\nBODY {}\nExec: echo ok\n", kind);
         let s = must_parse(&src);
         let ep = &s.endpoints[0];
         let actual = match &ep.body {
@@ -381,7 +384,8 @@ GET /x
 "#,
     );
     assert!(
-        errs.iter().any(|d| d.message.to_lowercase().contains("exec")),
+        errs.iter()
+            .any(|d| d.message.to_lowercase().contains("exec")),
         "expected error mentioning Exec, got {:?}",
         errs
     );
@@ -408,7 +412,10 @@ BODY json {
   title: /[a-z]+/
 "#,
     );
-    assert!(!errs.is_empty(), "expected error for unterminated body block");
+    assert!(
+        !errs.is_empty(),
+        "expected error for unterminated body block"
+    );
 }
 
 #[test]

@@ -29,10 +29,7 @@ type Extra<'a> = extra::Err<Rich<'a, char>>;
 pub fn parse_exec(raw: &str, start: usize) -> Result<Vec<ExecStage>, Diag> {
     let result = pipeline_parser().parse(raw).into_result();
     match result {
-        Ok(stages) => Ok(stages
-            .into_iter()
-            .map(|s| shift_stage(s, start))
-            .collect()),
+        Ok(stages) => Ok(stages.into_iter().map(|s| shift_stage(s, start)).collect()),
         Err(errs) => {
             let e = errs
                 .into_iter()
@@ -73,11 +70,9 @@ fn value_ref_parser<'a>() -> impl Parser<'a, &'a str, ValueRef, Extra<'a>> + Clo
                 .collect::<Vec<_>>(),
         )
         .or_not();
-    let body = just('$')
-        .ignore_then(body_path)
-        .map(|p| ValueRef::Body {
-            path: p.unwrap_or_default(),
-        });
+    let body = just('$').ignore_then(body_path).map(|p| ValueRef::Body {
+        path: p.unwrap_or_default(),
+    });
 
     let sigil_ref = choice((
         just('%').ignore_then(ident_parser()).map(ValueRef::Query),
@@ -110,7 +105,13 @@ fn text_token_parser<'a>() -> impl Parser<'a, &'a str, Vec<TextPart>, Extra<'a>>
     let quoted = choice((quoted_str('"'), quoted_str('\''))).map(TextPart::Literal);
     let bare = any()
         .filter(|c: &char| {
-            !c.is_whitespace() && *c != '|' && *c != '[' && *c != ']' && *c != '{' && *c != '"' && *c != '\''
+            !c.is_whitespace()
+                && *c != '|'
+                && *c != '['
+                && *c != ']'
+                && *c != '{'
+                && *c != '"'
+                && *c != '\''
         })
         .repeated()
         .at_least(1)

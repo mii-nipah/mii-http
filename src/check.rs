@@ -47,11 +47,14 @@ fn check_setup(setup: &Setup, diags: &mut Vec<Diag>) {
             ));
         }
         if setup.jwt_verifier.is_none() && setup.token_secret.is_none() {
-            diags.push(Diag::warning(
-                "AUTH Bearer configured without JWT_VERIFIER or TOKEN_SECRET",
-                span.clone(),
-                "tokens cannot be validated; any value will be accepted",
-            ).with_note("add `JWT_VERIFIER [ENV ...]` or `TOKEN_SECRET [ENV ...]`"));
+            diags.push(
+                Diag::warning(
+                    "AUTH Bearer configured without JWT_VERIFIER or TOKEN_SECRET",
+                    span.clone(),
+                    "tokens cannot be validated; any value will be accepted",
+                )
+                .with_note("add `JWT_VERIFIER [ENV ...]` or `TOKEN_SECRET [ENV ...]`"),
+            );
         }
     }
 }
@@ -193,7 +196,10 @@ fn forbid_stdin_only_in_field(
 
 fn security_check_type(ty: &TypeExpr, span: &Span, diags: &mut Vec<Diag>) {
     if let TypeExpr::Regex { pattern, .. } = ty {
-        let suspicious = matches!(pattern.as_str(), ".*" | ".+" | "(.*)" | "(.+)" | "[\\s\\S]*");
+        let suspicious = matches!(
+            pattern.as_str(),
+            ".*" | ".+" | "(.*)" | "(.+)" | "[\\s\\S]*"
+        );
         if suspicious {
             diags.push(Diag::warning(
                 format!("permissive regex `/{}/` accepts almost any input", pattern),
@@ -233,7 +239,13 @@ fn check_ref(r: &ValueRef, span: &Span, scope: &RefScope<'_>, diags: &mut Vec<Di
         ValueRef::Path(n) => scope.path.contains(n.as_str()),
         ValueRef::Var(n) => scope.vars.contains(n.as_str()),
         ValueRef::Body { path: p } => match (&ep.body, p.is_empty()) {
-            (Some(BodySpec::Json { schema: Some(schema), .. }), false) => {
+            (
+                Some(BodySpec::Json {
+                    schema: Some(schema),
+                    ..
+                }),
+                false,
+            ) => {
                 let head = &p[0];
                 schema.fields.iter().any(|f| &f.name == head)
             }
@@ -296,7 +308,10 @@ fn check_argv_safety(r: &ValueRef, span: &Span, ep: &Endpoint, diags: &mut Vec<D
                 span.clone(),
                 "declare a JSON schema with safe types, or use stdin",
             )),
-            Some(BodySpec::Json { schema: Some(schema), .. }) if !p.is_empty() => {
+            Some(BodySpec::Json {
+                schema: Some(schema),
+                ..
+            }) if !p.is_empty() => {
                 if let Some(field) = schema.fields.iter().find(|f| f.name == p[0]) {
                     let inner = match &field.ty {
                         JsonFieldType::Scalar(t) | JsonFieldType::Array(t) => t,
@@ -316,33 +331,28 @@ fn check_argv_safety(r: &ValueRef, span: &Span, ep: &Endpoint, diags: &mut Vec<D
 
 /// Emit an argv-context error for a named field whose declared type is
 /// unconstrained (`string` or `json`). Other types are safe.
-fn argv_unsafe_named(
-    ty: &TypeExpr,
-    kind: &str,
-    name: &str,
-    span: &Span,
-    diags: &mut Vec<Diag>,
-) {
+fn argv_unsafe_named(ty: &TypeExpr, kind: &str, name: &str, span: &Span, diags: &mut Vec<Diag>) {
     if matches!(ty, TypeExpr::String | TypeExpr::Json) {
-        diags.push(Diag::error(
-            format!(
-                "{} `{}` of type `{}` cannot be passed as argv",
-                kind,
-                name,
-                ty.name()
-            ),
-            span.clone(),
-            "use a constrained type (regex, union, int, ...) or pipe via stdin",
-        ).with_note("`string`/`json` are reserved for stdin to avoid command injection"));
+        diags.push(
+            Diag::error(
+                format!(
+                    "{} `{}` of type `{}` cannot be passed as argv",
+                    kind,
+                    name,
+                    ty.name()
+                ),
+                span.clone(),
+                "use a constrained type (regex, union, int, ...) or pipe via stdin",
+            )
+            .with_note("`string`/`json` are reserved for stdin to avoid command injection"),
+        );
     }
 }
 
 fn check_token(t: &ExecToken, scope: &RefScope<'_>, diags: &mut Vec<Diag>) {
     let parts_iter: Box<dyn Iterator<Item = (&Span, &Vec<TextPart>)>> = match t {
         ExecToken::Text { parts, span } => Box::new(std::iter::once((span, parts))),
-        ExecToken::Group { pieces, span } => {
-            Box::new(pieces.iter().map(move |p| (span, &p.parts)))
-        }
+        ExecToken::Group { pieces, span } => Box::new(pieces.iter().map(move |p| (span, &p.parts))),
     };
     for (span, parts) in parts_iter {
         for p in parts {

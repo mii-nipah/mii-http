@@ -7,7 +7,7 @@
 //!
 //! No execution happens here: this module only turns source text into AST.
 
-pub mod spec;
 pub mod exec;
+pub mod spec;
 
-pub use spec::{parse, ParseResult};
+pub use spec::{ParseResult, parse};

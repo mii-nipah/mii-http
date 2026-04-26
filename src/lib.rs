@@ -10,10 +10,10 @@
 //! - [`server`] — axum HTTP server gluing the pieces together.
 //! - [`diag`] — diagnostic reporting via ariadne.
 
-pub mod spec;
-pub mod parse;
 pub mod check;
-pub mod value;
-pub mod exec;
-pub mod server;
 pub mod diag;
+pub mod exec;
+pub mod parse;
+pub mod server;
+pub mod spec;
+pub mod value;

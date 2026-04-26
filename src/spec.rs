@@ -88,7 +88,11 @@ pub struct Endpoint {
 #[derive(Debug, Clone)]
 pub enum PathSegment {
     Literal(String),
-    Param { name: String, ty: TypeExpr, span: Span },
+    Param {
+        name: String,
+        ty: TypeExpr,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -109,10 +113,20 @@ pub struct VarDef {
 #[derive(Debug, Clone)]
 pub enum BodySpec {
     /// Raw textual body, no schema (`BODY json` unschematized, `BODY string`).
-    Json { schema: Option<JsonSchema>, span: Span },
-    Form { fields: Vec<NamedField>, span: Span },
-    String { span: Span },
-    Binary { span: Span },
+    Json {
+        schema: Option<JsonSchema>,
+        span: Span,
+    },
+    Form {
+        fields: Vec<NamedField>,
+        span: Span,
+    },
+    String {
+        span: Span,
+    },
+    Binary {
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -178,8 +192,14 @@ pub struct ExecSpec {
 #[derive(Debug, Clone)]
 pub enum ExecStage {
     /// A bare value reference (e.g. `$`, `$.path`, `%name`) used as stdin into next stage.
-    Source { reference: ValueRef, span: Span },
-    Command { tokens: Vec<ExecToken>, span: Span },
+    Source {
+        reference: ValueRef,
+        span: Span,
+    },
+    Command {
+        tokens: Vec<ExecToken>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -208,7 +228,9 @@ pub enum ValueRef {
     Header(String),
     Var(String),
     /// Whole body or a JSON path into the body. Empty path = whole body.
-    Body { path: Vec<String> },
+    Body {
+        path: Vec<String>,
+    },
 }
 
 impl ValueRef {

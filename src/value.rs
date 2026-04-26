@@ -107,13 +107,12 @@ pub fn validate_json(value: &Value, schema: &JsonSchema) -> Result<(), Validatio
 
 fn validate_json_field(v: &Value, f: &JsonField) -> Result<(), ValidationError> {
     match &f.ty {
-        JsonFieldType::Scalar(t) => validate_json_value(v, t).map_err(|e| {
-            ValidationError::new(format!("field `{}`: {}", f.name, e.message))
-        }),
+        JsonFieldType::Scalar(t) => validate_json_value(v, t)
+            .map_err(|e| ValidationError::new(format!("field `{}`: {}", f.name, e.message))),
         JsonFieldType::Array(t) => {
-            let arr = v
-                .as_array()
-                .ok_or_else(|| ValidationError::new(format!("field `{}` expected array", f.name)))?;
+            let arr = v.as_array().ok_or_else(|| {
+                ValidationError::new(format!("field `{}` expected array", f.name))
+            })?;
             for item in arr {
                 validate_json_value(item, t).map_err(|e| {
                     ValidationError::new(format!("field `{}`: {}", f.name, e.message))

@@ -38,7 +38,11 @@ fn validates_uuid() {
 
 #[test]
 fn validates_int_range() {
-    let ty = TypeExpr::IntRange { min: 0, max: 10, span: span() };
+    let ty = TypeExpr::IntRange {
+        min: 0,
+        max: 10,
+        span: span(),
+    };
     assert!(validate_text("0", &ty).is_ok());
     assert!(validate_text("5", &ty).is_ok());
     assert!(validate_text("10", &ty).is_ok());

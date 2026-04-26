@@ -1,7 +1,7 @@
 //! Tests for the chumsky-based Exec parser and `build_argv` semantics
 //! (group omission, interpolation).
 
-use mii_http::exec::{build_argv, BodyValue, ExecContext};
+use mii_http::exec::{BodyValue, ExecContext, build_argv};
 use mii_http::spec::{ExecStage, ExecToken, ValueRef};
 use std::collections::BTreeMap;
 
