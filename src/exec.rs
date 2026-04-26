@@ -1,8 +1,8 @@
-//! Exec runtime: build argv from a parsed pipeline and execute it as a chain
-//! of child processes. **No shell is ever invoked.**
+//! Exec runtime: render the parsed Exec mini-language into shell text and run
+//! it through `/bin/sh`.
 //!
 //! The pipeline AST itself is produced by [`crate::parse::exec`]; this module
-//! is concerned only with executing it safely.
+//! is concerned with turning typed request values into shell-safe words.
 //!
 //! Semantics:
 //!
@@ -10,34 +10,35 @@
 //!   var maps and a [`BodyValue`]).
 //! - A `Text` token is always emitted as one argv element. Missing
 //!   interpolations render as the empty string.
-//! - A `[..]` `Group` token is emitted only if every required interpolation
-//!   resolves; otherwise the whole group is omitted from argv (this is how
-//!   optional flags work).
+//! - A `[..]` `Group` token is used for shell words that contain interpolation.
+//!   It is emitted only if every interpolation resolves; otherwise the whole
+//!   group is omitted.
+//! - Request values interpolated into shell text are single-quoted. Literal
+//!   shell syntax written by the spec author remains literal shell syntax.
+//! - A binary body used outside stdin is written to a temp file and the path is
+//!   interpolated as a quoted shell word.
 //! - Pipeline stages are wired stdin → stdout. A bare `Source` stage
 //!   (`$ | cmd`) feeds a value as stdin to the next command.
 
 use crate::spec::{ExecStage, ExecToken, TextPart, ValueRef};
 use bytes::Bytes;
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::process::Stdio;
+use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 // ---------- Context ----------
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum BodyValue {
+    #[default]
     None,
     Text(String),
     Json(serde_json::Value),
     Form(BTreeMap<String, String>),
     Binary(Bytes),
-}
-
-impl Default for BodyValue {
-    fn default() -> Self {
-        BodyValue::None
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -82,12 +83,11 @@ impl ExecContext {
     }
 
     fn resolve_bytes(&self, r: &ValueRef) -> Option<Vec<u8>> {
-        if let ValueRef::Body { path } = r {
-            if path.is_empty() {
-                if let BodyValue::Binary(b) = &self.body {
-                    return Some(b.to_vec());
-                }
-            }
+        if let ValueRef::Body { path } = r
+            && path.is_empty()
+            && let BodyValue::Binary(b) = &self.body
+        {
+            return Some(b.to_vec());
         }
         self.resolve_text(r).map(|s| s.into_bytes())
     }
@@ -164,33 +164,10 @@ pub struct ExecOutput {
 /// Used by `--dry-run` to log the commands that would have run.
 pub fn preview_pipeline(pipeline: &[ExecStage], ctx: &ExecContext) -> Vec<String> {
     tracing::debug!(stages = pipeline.len(), "exec::preview_pipeline");
-    let mut out = Vec::with_capacity(pipeline.len());
-    for stage in pipeline {
-        match stage {
-            ExecStage::Source { reference, .. } => {
-                let resolved = ctx
-                    .resolve_text(reference)
-                    .map(|s| {
-                        if s.len() > 200 {
-                            format!("{}…", &s[..200])
-                        } else {
-                            s
-                        }
-                    })
-                    .unwrap_or_else(|| "<unresolved>".into());
-                out.push(format!(
-                    "stdin <- {} = {:?}",
-                    reference.describe(),
-                    resolved
-                ));
-            }
-            ExecStage::Command { tokens, .. } => {
-                let argv = build_argv(tokens, ctx);
-                out.push(format!("argv: {:?}", argv));
-            }
-        }
+    match render_shell_with_mode(pipeline, ctx, false) {
+        Ok(rendered) => vec![format!("shell: {}", rendered.script)],
+        Err(err) => vec![format!("shell: <unresolved: {}>", err)],
     }
-    out
 }
 
 pub async fn run_pipeline(
@@ -202,29 +179,146 @@ pub async fn run_pipeline(
     if pipeline.is_empty() {
         return Err("empty exec pipeline".into());
     }
-    let fut = run_pipeline_inner(pipeline, ctx);
-    if let Some(t) = timeout {
-        match tokio::time::timeout(t, fut).await {
-            Ok(r) => r,
-            Err(_) => Err("execution timed out".into()),
+    let rendered = render_shell(pipeline, ctx)?;
+    run_shell(rendered, timeout).await
+}
+
+struct RenderedShell {
+    script: String,
+    stdin: Option<Vec<u8>>,
+    _temp_files: Vec<NamedTempFile>,
+}
+
+struct ShellRenderer<'a> {
+    ctx: &'a ExecContext,
+    temp_files: Vec<NamedTempFile>,
+    materialize_binary: bool,
+}
+
+impl<'a> ShellRenderer<'a> {
+    fn new(ctx: &'a ExecContext, materialize_binary: bool) -> Self {
+        Self {
+            ctx,
+            temp_files: Vec::new(),
+            materialize_binary,
         }
-    } else {
-        fut.await
+    }
+
+    fn resolve_shell_text(&mut self, r: &ValueRef) -> Result<Option<String>, String> {
+        if let ValueRef::Body { path } = r
+            && path.is_empty()
+            && let BodyValue::Binary(bytes) = &self.ctx.body
+        {
+            if !self.materialize_binary {
+                return Ok(Some("<binary temp file>".into()));
+            }
+            let mut file = NamedTempFile::new().map_err(|e| e.to_string())?;
+            file.write_all(bytes).map_err(|e| e.to_string())?;
+            let path = file.path().to_string_lossy().to_string();
+            self.temp_files.push(file);
+            return Ok(Some(path));
+        }
+        Ok(self.ctx.resolve_text(r))
+    }
+
+    fn render_command(&mut self, tokens: &[ExecToken]) -> Result<String, String> {
+        let mut words = Vec::new();
+        for token in tokens {
+            match token {
+                ExecToken::Text {
+                    parts, force_quote, ..
+                } => {
+                    words.push(self.render_text_word(parts, *force_quote, false)?);
+                }
+                ExecToken::Group { pieces, .. } => {
+                    let mut group_words = Vec::with_capacity(pieces.len());
+                    let mut all_present = true;
+                    for piece in pieces {
+                        match self.render_optional_word(&piece.parts, piece.force_quote)? {
+                            Some(word) => group_words.push(word),
+                            None => {
+                                all_present = false;
+                                break;
+                            }
+                        }
+                    }
+                    if all_present {
+                        words.extend(group_words);
+                    }
+                }
+            }
+        }
+        if words.is_empty() {
+            return Err("command stage produced empty shell command".into());
+        }
+        Ok(words.join(" "))
+    }
+
+    fn render_text_word(
+        &mut self,
+        parts: &[TextPart],
+        force_quote: bool,
+        omit_missing: bool,
+    ) -> Result<String, String> {
+        let mut out = String::new();
+        let mut has_interp = false;
+        for part in parts {
+            match part {
+                TextPart::Literal(s) => out.push_str(s),
+                TextPart::Interp(r) => {
+                    has_interp = true;
+                    match self.resolve_shell_text(r)? {
+                        Some(value) => out.push_str(&value),
+                        None if omit_missing => return Ok(String::new()),
+                        None => {}
+                    }
+                }
+            }
+        }
+        Ok(shell_word(&out, force_quote || has_interp))
+    }
+
+    fn render_optional_word(
+        &mut self,
+        parts: &[TextPart],
+        force_quote: bool,
+    ) -> Result<Option<String>, String> {
+        let mut out = String::new();
+        let mut has_interp = false;
+        for part in parts {
+            match part {
+                TextPart::Literal(s) => out.push_str(s),
+                TextPart::Interp(r) => {
+                    has_interp = true;
+                    let Some(value) = self.resolve_shell_text(r)? else {
+                        return Ok(None);
+                    };
+                    out.push_str(&value);
+                }
+            }
+        }
+        Ok(Some(shell_word(&out, force_quote || has_interp)))
     }
 }
 
-async fn run_pipeline_inner(
+fn render_shell(pipeline: &[ExecStage], ctx: &ExecContext) -> Result<RenderedShell, String> {
+    render_shell_with_mode(pipeline, ctx, true)
+}
+
+fn render_shell_with_mode(
     pipeline: &[ExecStage],
     ctx: &ExecContext,
-) -> Result<ExecOutput, String> {
+    materialize_binary: bool,
+) -> Result<RenderedShell, String> {
     let mut pending_stdin: Option<Vec<u8>> = None;
-    let mut prev_child: Option<tokio::process::Child> = None;
+    let mut commands = Vec::new();
+    let mut saw_command = false;
+    let mut renderer = ShellRenderer::new(ctx, materialize_binary);
 
-    let mut i = 0;
-    while i < pipeline.len() {
-        match &pipeline[i] {
+    for stage in pipeline {
+        match stage {
             ExecStage::Source { reference, .. } => {
-                if prev_child.is_some() {
+                if saw_command {
                     return Err(
                         "value-reference source after a command stage is not supported".into(),
                     );
@@ -233,58 +327,51 @@ async fn run_pipeline_inner(
                     .resolve_bytes(reference)
                     .ok_or_else(|| format!("unresolved {}", reference.describe()))?;
                 pending_stdin = Some(bytes);
-                i += 1;
             }
             ExecStage::Command { tokens, .. } => {
-                let argv = build_argv(tokens, ctx);
-                if argv.is_empty() {
-                    return Err("command stage produced empty argv".into());
-                }
-                let program = argv[0].clone();
-                let args = &argv[1..];
-                tracing::debug!(program = %program, args = ?args, "exec::run_pipeline: spawning");
-                let mut cmd = Command::new(&program);
-                cmd.args(args);
-                cmd.stdout(Stdio::piped());
-                cmd.stderr(Stdio::piped());
-
-                let stdin_data: Option<Vec<u8>>;
-                if let Some(mut prev) = prev_child.take() {
-                    if let Some(out) = prev.stdout.take() {
-                        let std_out: std::process::Stdio =
-                            out.try_into().map_err(|e: std::io::Error| e.to_string())?;
-                        cmd.stdin(std_out);
-                    } else {
-                        cmd.stdin(Stdio::null());
-                    }
-                    tokio::spawn(async move {
-                        let _ = prev.wait().await;
-                    });
-                    stdin_data = None;
-                } else if let Some(d) = pending_stdin.take() {
-                    cmd.stdin(Stdio::piped());
-                    stdin_data = Some(d);
-                } else {
-                    cmd.stdin(Stdio::null());
-                    stdin_data = None;
-                }
-
-                let mut child = cmd
-                    .spawn()
-                    .map_err(|e| format!("failed to spawn `{}`: {}", program, e))?;
-                if let Some(d) = stdin_data {
-                    if let Some(mut sin) = child.stdin.take() {
-                        sin.write_all(&d).await.map_err(|e| e.to_string())?;
-                        drop(sin);
-                    }
-                }
-                prev_child = Some(child);
-                i += 1;
+                saw_command = true;
+                commands.push(renderer.render_command(tokens)?);
             }
         }
     }
+    if commands.is_empty() {
+        return Err("pipeline ended without a command".to_string());
+    }
+    Ok(RenderedShell {
+        script: commands.join(" | "),
+        stdin: pending_stdin,
+        _temp_files: renderer.temp_files,
+    })
+}
 
-    let mut child = prev_child.ok_or_else(|| "pipeline ended without a command".to_string())?;
+async fn run_shell(
+    rendered: RenderedShell,
+    timeout: Option<std::time::Duration>,
+) -> Result<ExecOutput, String> {
+    tracing::debug!(script = %rendered.script, "exec::run_shell: spawning");
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg("-c").arg(&rendered.script);
+    cmd.kill_on_drop(true);
+    cmd.process_group(0);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    if rendered.stdin.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn shell: {}", e))?;
+    let child_id = child.id();
+    if let Some(stdin) = rendered.stdin
+        && let Some(mut sin) = child.stdin.take()
+    {
+        sin.write_all(&stdin).await.map_err(|e| e.to_string())?;
+        drop(sin);
+    }
+
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let stdout_handle = tokio::spawn(async move {
@@ -305,12 +392,63 @@ async fn run_pipeline_inner(
         }
         buf
     });
-    let status = child.wait().await.map_err(|e| e.to_string())?;
+
+    let status = if let Some(timeout) = timeout {
+        tokio::select! {
+            status = child.wait() => status.map_err(|e| e.to_string())?,
+            _ = tokio::time::sleep(timeout) => {
+                if let Some(pid) = child_id {
+                    kill_process_group(pid);
+                }
+                let _ = child.kill().await;
+                return Err("execution timed out".into());
+            }
+        }
+    } else {
+        child.wait().await.map_err(|e| e.to_string())?
+    };
     let stdout = stdout_handle.await.unwrap_or_default();
     let stderr = stderr_handle.await.unwrap_or_default();
+    if let Some(pid) = child_id {
+        kill_process_group(pid);
+    }
     Ok(ExecOutput {
         status: status.code().unwrap_or(-1),
         stdout,
         stderr,
     })
+}
+
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    let pgid = -(pid as libc::pid_t);
+    // The shell may have already exited; ESRCH is fine here. This is a best
+    // effort cleanup for shell-spawned descendants after normal completion.
+    unsafe {
+        libc::kill(pgid, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: u32) {}
+
+fn shell_word(value: &str, force_quote: bool) -> String {
+    if force_quote || value.is_empty() || value.chars().any(char::is_whitespace) {
+        shell_quote(value)
+    } else {
+        value.to_string()
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    let mut quoted = String::from("'");
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }

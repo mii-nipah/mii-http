@@ -343,7 +343,7 @@ fn header_interpolation_uses_header_ref() {
         r#"
 GET /h
 HEADER X-Custom: /[a-z]+/
-Exec: echo {^X-Custom}
+Exec: echo [X=^X-Custom]
 "#,
     );
     let stages = &s.endpoints[0].exec.pipeline;
@@ -351,11 +351,11 @@ Exec: echo {^X-Custom}
         ExecStage::Command { tokens, .. } => tokens,
         _ => panic!(),
     };
-    // last token contains an Interp(Header)
+    // last shell-piece group contains an Interp(Header)
     let last = tokens.last().unwrap();
     let parts = match last {
-        ExecToken::Text { parts, .. } => parts,
-        _ => panic!("expected text token"),
+        ExecToken::Group { pieces, .. } => &pieces[0].parts,
+        _ => panic!("expected group token"),
     };
     assert!(parts.iter().any(|p| matches!(
         p,

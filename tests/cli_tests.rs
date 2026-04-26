@@ -4,12 +4,8 @@ use std::process::Command;
 #[test]
 fn check_json_reports_machine_readable_diagnostics() {
     let mut spec = tempfile::NamedTempFile::new().expect("temp file");
-    write!(
-        spec,
-        "{}",
-        "GET /x\nResponse-Type text/plain\nExec: echo [%missing]\n"
-    )
-    .expect("write spec");
+    spec.write_all(b"GET /x\nResponse-Type text/plain\nExec: echo [%missing]\n")
+        .expect("write spec");
 
     let output = Command::new(env!("CARGO_BIN_EXE_mii-http"))
         .args(["--check", "--json", spec.path().to_str().unwrap()])

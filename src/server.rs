@@ -6,7 +6,7 @@ use crate::value::{self, ValidationError};
 use axum::{
     Router,
     body::Bytes,
-    extract::{Path as AxPath, Query, State},
+    extract::{DefaultBodyLimit, Path as AxPath, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{MethodFilter, MethodRouter},
@@ -71,13 +71,12 @@ fn build_router(state: AppState) -> Router {
     tracing::debug!("server::build_router");
     let mut routes: HashMap<String, MethodRouter<AppState>> = HashMap::new();
     let prefix = compute_prefix(&state.spec.setup);
+    let body_limit = state.spec.setup.max_body_size.map(saturating_usize);
 
     for (idx, ep) in state.spec.endpoints.iter().enumerate() {
         let path = format!("{}{}", prefix, axum_path(&ep.path_segments));
         tracing::debug!(method = ep.method.as_str(), path = %path, "server::build_router: mounting route");
-        let entry = routes
-            .entry(path)
-            .or_insert_with(MethodRouter::<AppState>::new);
+        let entry = routes.entry(path).or_default();
         let idx_clone = idx;
         let mr = MethodRouter::<AppState>::new().on(
             method_filter(ep.method),
@@ -95,7 +94,16 @@ fn build_router(state: AppState) -> Router {
     for (path, mr) in routes {
         router = router.route(&path, mr);
     }
-    router.with_state(state)
+    let router = router.with_state(state);
+    if let Some(limit) = body_limit {
+        router.layer(DefaultBodyLimit::max(limit))
+    } else {
+        router
+    }
+}
+
+fn saturating_usize(n: u64) -> usize {
+    usize::try_from(n).unwrap_or(usize::MAX)
 }
 
 fn method_filter(m: Method) -> MethodFilter {
@@ -171,7 +179,7 @@ async fn handle_inner(
         query: validate_query(setup, ep, &query)?,
         headers: validate_headers(setup, ep, &headers)?,
         path: validate_path(ep, &path)?,
-        vars: resolve_vars(ep, &headers)?,
+        vars: resolve_vars(setup, ep, &headers)?,
         body: build_body(ep, body)?,
     };
 
@@ -240,13 +248,13 @@ fn check_validation(r: Result<(), ValidationError>, scope: &str) -> Result<(), H
 }
 
 fn enforce_body_size(setup: &Setup, body: &Bytes) -> Result<(), HandlerError> {
-    if let Some(max) = setup.max_body_size {
-        if body.len() as u64 > max {
-            return Err(HandlerError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!("body exceeds max size of {} bytes", max),
-            ));
-        }
+    if let Some(max) = setup.max_body_size
+        && body.len() as u64 > max
+    {
+        return Err(HandlerError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("body exceeds max size of {} bytes", max),
+        ));
     }
     Ok(())
 }
@@ -254,7 +262,7 @@ fn enforce_body_size(setup: &Setup, body: &Bytes) -> Result<(), HandlerError> {
 fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<(), HandlerError> {
     tracing::debug!("server::authenticate");
     if let Some(AuthSpec::BearerHeader { header: hname, .. }) = &state.spec.setup.auth {
-        let token = extract_bearer(headers, hname)?;
+        let token = extract_bearer(headers, hname, state.spec.setup.max_header_size)?;
         verify_token(state, &token)?;
     }
     Ok(())
@@ -266,10 +274,10 @@ fn enforce_size(
     status: StatusCode,
     label: impl FnOnce() -> String,
 ) -> Result<(), HandlerError> {
-    if let Some(max) = max {
-        if actual as u64 > max {
-            return Err(HandlerError::new(status, label()));
-        }
+    if let Some(max) = max
+        && actual as u64 > max
+    {
+        return Err(HandlerError::new(status, label()));
     }
     Ok(())
 }
@@ -364,14 +372,14 @@ fn validate_path(
 }
 
 fn resolve_vars(
+    setup: &Setup,
     ep: &Endpoint,
     headers: &HeaderMap,
 ) -> Result<BTreeMap<String, String>, HandlerError> {
     tracing::debug!(endpoint = %ep.path, vars = ep.vars.len(), "server::resolve_vars");
     let mut out = BTreeMap::new();
     for v in &ep.vars {
-        let resolved = resolve_runtime_source(&v.source, headers)
-            .map_err(|e| HandlerError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let resolved = resolve_runtime_source(setup, &v.source, headers)?;
         out.insert(v.name.clone(), resolved);
     }
     Ok(out)
@@ -422,13 +430,23 @@ fn header_get(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn extract_bearer(headers: &HeaderMap, header_name: &str) -> Result<String, HandlerError> {
+fn extract_bearer(
+    headers: &HeaderMap,
+    header_name: &str,
+    max_header_size: Option<u64>,
+) -> Result<String, HandlerError> {
     let raw = header_get(headers, header_name).ok_or_else(|| {
         HandlerError::new(
             StatusCode::UNAUTHORIZED,
             format!("missing `{}`", header_name),
         )
     })?;
+    enforce_size(
+        raw.len(),
+        max_header_size,
+        StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+        || format!("auth header `{}` exceeds max size", header_name),
+    )?;
     let token = raw
         .strip_prefix("Bearer ")
         .or_else(|| raw.strip_prefix("bearer "))
@@ -475,13 +493,32 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-fn resolve_runtime_source(src: &ValueSource, headers: &HeaderMap) -> Result<String, String> {
+fn resolve_runtime_source(
+    setup: &Setup,
+    src: &ValueSource,
+    headers: &HeaderMap,
+) -> Result<String, HandlerError> {
     match src {
-        ValueSource::Env { name, .. } => {
-            std::env::var(name).map_err(|_| format!("env var `{}` not set", name))
-        }
+        ValueSource::Env { name, .. } => std::env::var(name).map_err(|_| {
+            HandlerError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("env var `{}` not set", name),
+            )
+        }),
         ValueSource::Header { name, .. } => {
-            header_get(headers, name).ok_or_else(|| format!("header `{}` not present", name))
+            let value = header_get(headers, name).ok_or_else(|| {
+                HandlerError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!("missing VAR header `{}`", name),
+                )
+            })?;
+            enforce_size(
+                value.len(),
+                setup.max_header_size,
+                StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                || format!("VAR header `{}` exceeds max size", name),
+            )?;
+            Ok(value)
         }
         ValueSource::Literal { value, .. } => Ok(value.clone()),
     }

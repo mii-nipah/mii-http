@@ -120,7 +120,7 @@ Commands have a nice syntax for interacting with the request, for example suppos
 ```http
 Exec: echo "Hello, {%name}!"
 ```
-In the example above you can see the string interpolation syntax, which is `{value}`, what will be inside depends on your desired value.
+In the example above you can see the string interpolation syntax, which is `{value}` inside a quoted string. Bare `{value}` outside a string is invalid.
 While using a query param uses `%name`, using a path param uses `:name`, using a header param uses `^name`, and using a body param uses a simplified JSON path syntax (or just `$` if you want to use the entire body, or if your body is not a JSON but a simple string). The JSON path syntax also can be used when your BODY is a FORM for simple field access.
 You may also define arbitrary variables available to your command, for example if you need to consume an environment variable there:
 ```http
@@ -129,9 +129,9 @@ Response-Type text/plain
 VAR server_name [ENV Server_Name]
 Exec: echo "Hello, {@server_name}!"
 ```
-In the example above, we defined a variable called server_name, which is obtained from the environment variables of the process, and then we used it in our command with the syntax `{@name}`.
+In the example above, we defined a variable called server_name, which is obtained from the environment variables of the process, and then we used it inside a quoted string with the syntax `{@name}`.
 
-Outside of string interpolation, you can also use the same syntax for flags and positional arguments in your command, for example:
+Outside of string interpolation, use `[]` for every shell word or shell-word group that contains interpolation, required or optional, for example:
 ```http
 GET /greet
 Response-Type text/plain
@@ -143,6 +143,8 @@ Response-Type text/plain
 Exec: some_command [--flag %query_param]
 ```
 Values are "interpolated" in the command when they are inside `[]`.
+If every value in a `[]` group is present, the group is emitted. If an optional value in the group is missing, the whole group is omitted.
+Bare references like `%name`, `:id`, `^Header`, `@var`, or `$.field` are literal shell text, not interpolation. `mii-http --check` warns when a bare reference matches a declared input; escape it (for example `\%name`) if you intentionally want the literal text.
 
 You can pass some value as stdin by doing the following:
 ```http

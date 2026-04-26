@@ -164,6 +164,22 @@ Exec: echo [$]
 }
 
 #[test]
+fn allows_binary_body_as_argv_temp_file() {
+    let s = parse_or_panic(
+        r#"
+POST /x
+BODY binary
+Exec: cat [$]
+"#,
+    );
+    let errs: Vec<_> = check(&s)
+        .into_iter()
+        .filter(|d| d.kind == DiagKind::Error)
+        .collect();
+    assert!(errs.is_empty(), "expected clean, got {:?}", errs);
+}
+
+#[test]
 fn rejects_duplicate_query_params() {
     let errs = errors_of(
         r#"
@@ -271,6 +287,98 @@ Exec: $ | xargs echo
 }
 
 #[test]
+fn warns_on_bare_exec_reference_literal() {
+    let warns = warnings_of(
+        r#"
+GET /x
+QUERY name: /[a-z]+/
+Exec: echo %name
+"#,
+    );
+    assert!(
+        warns
+            .iter()
+            .any(|d| d.message.contains("bare Exec reference `%name`")),
+        "expected bare reference warning, got {:?}",
+        warns
+    );
+}
+
+#[test]
+fn warns_on_bare_exec_reference_inside_shell_piece() {
+    let warns = warnings_of(
+        r#"
+GET /x
+QUERY name: /[a-z]+/
+Exec: echo --name=%name
+"#,
+    );
+    assert!(
+        warns
+            .iter()
+            .any(|d| d.message.contains("bare Exec reference `%name`")),
+        "expected bare reference warning, got {:?}",
+        warns
+    );
+}
+
+#[test]
+fn warns_on_bare_body_field_reference() {
+    let warns = warnings_of(
+        r#"
+POST /x
+BODY form {
+  name: /[a-z]+/
+}
+Exec: echo $.name
+"#,
+    );
+    assert!(
+        warns
+            .iter()
+            .any(|d| d.message.contains("bare Exec reference `$.name`")),
+        "expected bare body reference warning, got {:?}",
+        warns
+    );
+}
+
+#[test]
+fn does_not_warn_on_unrelated_percent_literals() {
+    let warns = warnings_of(
+        r#"
+GET /x
+QUERY name: /[a-z]+/
+Exec: printf %s [%name]
+"#,
+    );
+    assert!(
+        !warns
+            .iter()
+            .any(|d| d.message.contains("bare Exec reference")),
+        "unexpected bare reference warning: {:?}",
+        warns
+    );
+}
+
+#[test]
+fn does_not_warn_on_escaped_literal_reference() {
+    let warns = warnings_of(
+        r#"
+GET /x
+QUERY name: /[a-z]+/
+Exec: echo \%name
+"#,
+    );
+    assert!(
+        !warns
+            .iter()
+            .any(|d| d.message.contains("bare Exec reference")),
+        "unexpected bare reference warning: {:?}",
+        warns
+    );
+}
+
+#[test]
 fn rejects_unresolved_body_field_reference() {
     let errs = errors_of(
         r#"
@@ -303,5 +411,53 @@ Exec: echo [$.blob]
     assert!(
         !errs.is_empty(),
         "expected error for `string` json field, got nothing"
+    );
+}
+
+#[test]
+fn rejects_header_var_passed_as_argv() {
+    let errs = errors_of(
+        r#"
+GET /x
+VAR user_supplied [HEADER X-Arg]
+Exec: echo [@user_supplied]
+"#,
+    );
+    assert!(
+        errs.iter().any(|d| d.message.contains("request header")),
+        "expected header-backed VAR argv rejection, got {:?}",
+        errs
+    );
+}
+
+#[test]
+fn allows_header_var_via_stdin() {
+    let s = parse_or_panic(
+        r#"
+POST /x
+VAR user_supplied [HEADER X-Arg]
+Exec: @user_supplied | xargs echo
+"#,
+    );
+    let errs: Vec<_> = check(&s)
+        .into_iter()
+        .filter(|d| d.kind == DiagKind::Error)
+        .collect();
+    assert!(errs.is_empty(), "expected clean, got {:?}", errs);
+}
+
+#[test]
+fn rejects_request_controlled_executable() {
+    let errs = errors_of(
+        r#"
+GET /x
+QUERY cmd: echo|printf
+Exec: "{%cmd}" hello
+"#,
+    );
+    assert!(
+        errs.iter().any(|d| d.message.contains("executable")),
+        "expected executable interpolation rejection, got {:?}",
+        errs
     );
 }

@@ -1,9 +1,11 @@
 //! Tests for the chumsky-based Exec parser and `build_argv` semantics
 //! (group omission, interpolation).
 
-use mii_http::exec::{BodyValue, ExecContext, build_argv};
-use mii_http::spec::{ExecStage, ExecToken, ValueRef};
+use bytes::Bytes;
+use mii_http::exec::{BodyValue, ExecContext, build_argv, run_pipeline};
+use mii_http::spec::{ExecStage, ExecToken, TextPart, ValueRef};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 fn parse(src: &str) -> Vec<ExecStage> {
     mii_http::parse::exec::parse_exec(src, 0).expect("expected exec to parse")
@@ -66,10 +68,25 @@ fn parses_all_value_ref_sigils() {
 
 #[test]
 fn parses_brace_interpolations() {
-    let p = parse("echo {%name}-{:id}");
+    let p = parse(r#"echo "{%name}-{:id}""#);
     let toks = cmd_tokens(&p[0]);
     assert_eq!(toks.len(), 2);
-    assert!(matches!(toks[1], ExecToken::Text { .. }));
+    match &toks[1] {
+        ExecToken::Text {
+            parts, force_quote, ..
+        } => {
+            assert!(*force_quote);
+            assert!(parts.iter().any(|p| matches!(p, TextPart::Interp(_))));
+        }
+        _ => panic!("expected text token"),
+    }
+}
+
+#[test]
+fn rejects_brace_interpolation_outside_strings() {
+    parse_err("echo {%name}");
+    parse_err("echo a{%name}");
+    parse_err("echo [{%name}]");
 }
 
 #[test]
@@ -91,16 +108,27 @@ fn rejects_empty_input() {
 
 #[test]
 fn build_argv_interpolates_present_values() {
-    let p = parse("echo Hello, {%name}!");
+    let p = parse(r#"echo "Hello, {%name}!""#);
     let toks = cmd_tokens(&p[0]);
     let mut ctx = ExecContext::default();
     ctx.query.insert("name".into(), "World".into());
     let argv = build_argv(toks, &ctx);
-    assert_eq!(argv, vec!["echo", "Hello,", "World!"]);
+    assert_eq!(argv, vec!["echo", "Hello, World!"]);
 }
 
 #[test]
-fn build_argv_omits_optional_group_when_value_missing() {
+fn build_argv_interpolates_required_shell_piece_groups() {
+    let p = parse("echo [X=^X-Custom] [--name %name]");
+    let toks = cmd_tokens(&p[0]);
+    let mut ctx = ExecContext::default();
+    ctx.headers.insert("X-Custom".into(), "abc".into());
+    ctx.query.insert("name".into(), "World".into());
+    let argv = build_argv(toks, &ctx);
+    assert_eq!(argv, vec!["echo", "X=abc", "--name", "World"]);
+}
+
+#[test]
+fn build_argv_omits_shell_piece_group_when_optional_value_missing() {
     let p = parse("echo Hello, [%name] [%guest]");
     let toks = cmd_tokens(&p[0]);
     let mut ctx = ExecContext::default();
@@ -111,7 +139,7 @@ fn build_argv_omits_optional_group_when_value_missing() {
 
 #[test]
 fn build_argv_renders_text_interp_as_empty_when_missing() {
-    let p = parse("echo {%name}");
+    let p = parse(r#"echo "{%name}""#);
     let toks = cmd_tokens(&p[0]);
     let ctx = ExecContext::default();
     let argv = build_argv(toks, &ctx);
@@ -121,7 +149,7 @@ fn build_argv_renders_text_interp_as_empty_when_missing() {
 
 #[test]
 fn build_argv_emits_all_pieces_of_present_group() {
-    let p = parse("cmd [-flag {%name}]");
+    let p = parse("cmd [-flag %name]");
     let toks = cmd_tokens(&p[0]);
     let mut ctx = ExecContext::default();
     ctx.query.insert("name".into(), "value".into());
@@ -132,7 +160,7 @@ fn build_argv_emits_all_pieces_of_present_group() {
 #[test]
 fn build_argv_treats_special_chars_as_literal_data() {
     // Anything sensitive (`;`, `$()`) is just a string, not shell-evaluated.
-    let p = parse("echo {%name}");
+    let p = parse(r#"echo "{%name}""#);
     let toks = cmd_tokens(&p[0]);
     let mut ctx = ExecContext::default();
     ctx.query
@@ -143,7 +171,7 @@ fn build_argv_treats_special_chars_as_literal_data() {
 
 #[test]
 fn build_argv_resolves_body_form_field() {
-    let p = parse("echo {$.username}");
+    let p = parse(r#"echo "{$.username}""#);
     let toks = cmd_tokens(&p[0]);
     let mut form = BTreeMap::new();
     form.insert("username".to_string(), "alice".to_string());
@@ -157,7 +185,7 @@ fn build_argv_resolves_body_form_field() {
 
 #[test]
 fn build_argv_resolves_body_json_path() {
-    let p = parse("echo {$.user.name}");
+    let p = parse(r#"echo "{$.user.name}""#);
     let toks = cmd_tokens(&p[0]);
     let body = serde_json::json!({"user": {"name": "Bob"}});
     let ctx = ExecContext {
@@ -166,4 +194,111 @@ fn build_argv_resolves_body_json_path() {
     };
     let argv = build_argv(toks, &ctx);
     assert_eq!(argv, vec!["echo", "Bob"]);
+}
+
+#[tokio::test]
+async fn run_pipeline_uses_shell_for_spec_syntax() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let marker = dir.path().join("shell-redirection-worked");
+    let pipeline = parse(&format!("printf worked > {}", marker.display()));
+
+    let output = run_pipeline(&pipeline, &ExecContext::default(), None)
+        .await
+        .expect("run pipeline");
+
+    assert_eq!(output.status, 0);
+    assert_eq!(std::fs::read_to_string(marker).expect("marker"), "worked");
+}
+
+#[tokio::test]
+async fn run_pipeline_shell_quotes_request_interpolation() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let marker = dir.path().join("request-injection-ran");
+    let payload = format!("$(printf pwn > {})", marker.display());
+    let pipeline = parse(r#"printf %s "{%name}""#);
+    let mut ctx = ExecContext::default();
+    ctx.query.insert("name".into(), payload.clone());
+
+    let output = run_pipeline(&pipeline, &ctx, None)
+        .await
+        .expect("run pipeline");
+
+    assert_eq!(output.status, 0);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), payload);
+    assert!(
+        !marker.exists(),
+        "request interpolation was executed by shell"
+    );
+}
+
+#[tokio::test]
+async fn run_pipeline_preserves_quoted_literal_as_one_shell_word() {
+    let pipeline = parse(r#"printf %s "a;b""#);
+
+    let output = run_pipeline(&pipeline, &ExecContext::default(), None)
+        .await
+        .expect("run pipeline");
+
+    assert_eq!(output.status, 0);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "a;b");
+}
+
+#[tokio::test]
+async fn run_pipeline_materializes_binary_body_as_file_argument() {
+    let pipeline = parse("cat [$]");
+    let ctx = ExecContext {
+        body: BodyValue::Binary(Bytes::from_static(b"abc\0def")),
+        ..Default::default()
+    };
+
+    let output = run_pipeline(&pipeline, &ctx, None)
+        .await
+        .expect("run pipeline");
+
+    assert_eq!(output.status, 0);
+    assert_eq!(output.stdout, b"abc\0def");
+}
+
+#[tokio::test]
+async fn run_pipeline_timeout_kills_final_child() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let marker = dir.path().join("final-child-survived");
+    let pipeline = parse(&format!(
+        "sh -c 'sleep 0.2; printf pwn > {}'",
+        marker.display()
+    ));
+
+    let err = run_pipeline(
+        &pipeline,
+        &ExecContext::default(),
+        Some(Duration::from_millis(30)),
+    )
+    .await
+    .expect_err("expected timeout");
+
+    assert!(err.contains("timed out"), "unexpected error: {err}");
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert!(!marker.exists(), "timed-out process kept running");
+}
+
+#[tokio::test]
+async fn run_pipeline_timeout_kills_prior_pipeline_children() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let marker = dir.path().join("prior-child-survived");
+    let pipeline = parse(&format!(
+        "sh -c 'sleep 0.2; printf pwn > {}' | cat",
+        marker.display()
+    ));
+
+    let err = run_pipeline(
+        &pipeline,
+        &ExecContext::default(),
+        Some(Duration::from_millis(30)),
+    )
+    .await
+    .expect_err("expected timeout");
+
+    assert!(err.contains("timed out"), "unexpected error: {err}");
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert!(!marker.exists(), "timed-out pipeline child kept running");
 }

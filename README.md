@@ -41,7 +41,7 @@ Hello, world
 
 - **Declarative.** Endpoints, types, headers, query and body schemas live in a single readable file.
 - **Typed.** Every input is validated against a real type (`int`, `uuid`, ranges, unions, regexes, typed JSON, forms, …) before your command ever runs.
-- **Safe by default.** Values are interpolated as argv, never spliced into a shell. The `--check` command flags risky patterns.
+- **Safe by default.** Request values are type-checked and shell-quoted before execution. The `--check` command flags risky patterns.
 - **Tiny.** One binary. No runtime, no framework to learn — write a spec, point `mii-http` at it.
 
 ## Quick start
@@ -114,18 +114,19 @@ Exec: echo username=[$.username] age=[$.age]
 
 ### Inputs
 
-| Source        | Reference in `Exec`           |
-| ------------- | ----------------------------- |
-| Query param   | `[%name]` / `{%name}`         |
-| Path param    | `[:name]` / `{:name}`         |
-| Header        | `[^Name]` / `{^Name}`         |
-| Body field    | `[$.field]` / `{$.field}`     |
-| Whole body    | `$` (as stdin)                |
-| User var      | `[@name]` / `{@name}`         |
+| Source        | Reference in `Exec`                      |
+| ------------- | ---------------------------------------- |
+| Query param   | `[%name]` / `"Hello, {%name}"`           |
+| Path param    | `[:name]` / `"user {:name}"`             |
+| Header        | `[^Name]` / `"header {^Name}"`           |
+| Body field    | `[$.field]` / `"field {$.field}"`        |
+| Whole body    | `$` (as stdin)                           |
+| User var      | `[@name]` / `"var {@name}"`              |
 
-- `[ … ]` is **argv interpolation** — values become separate process arguments. Missing optional values are dropped entirely.
-- `{ … }` is **string interpolation** inside a single argument. Missing optionals become empty strings.
+- `[ … ]` is **shell-piece interpolation** — use it for any shell word or shell-word group that contains request data, required or optional. Missing optional values drop the whole group.
+- `{ … }` is **string interpolation** and is valid only inside quoted strings. Use it when the request data is part of a larger string. Missing optionals become empty strings.
 - `$ | …` pipes the request body to the command's stdin.
+- Bare references like `%name` in `Exec` are literal shell text, not interpolation. `--check` warns when they match declared inputs; escape them as `\%name` if you really want the literal text.
 
 ### Types
 
@@ -173,7 +174,7 @@ The CI workflow publishes downloadable VSIX files through GitHub, not the VS Cod
                                         ┌──────────────┐    axum     ┌──────────────┐
                                         │   server::   │────────────▶│   exec::     │
                                         │  routes &    │             │  validate +  │
-                                        │  validation  │             │  spawn argv  │
+                                        │  validation  │             │  shell run   │
                                         └──────────────┘             └──────────────┘
 ```
 
@@ -183,11 +184,12 @@ Source layout:
 - [src/spec.rs](src/spec.rs), [src/value.rs](src/value.rs) — typed AST and value model.
 - [src/check.rs](src/check.rs), [src/diag.rs](src/diag.rs) — semantic checks and `ariadne` diagnostics.
 - [src/server.rs](src/server.rs) — `axum` routing, request validation, header/body/query decoding.
-- [src/exec.rs](src/exec.rs) — argv assembly, interpolation, sandboxed process execution.
+- [src/exec.rs](src/exec.rs) — shell rendering, interpolation, temp-file materialization and process execution.
 
 ## Security model
 
-- Values are **never** spliced into a shell. Each `[ … ]` becomes a distinct argv entry; each `{ … }` is escaped into a single argument.
+- `Exec` runs through `/bin/sh`; shell syntax written in the spec is trusted shell syntax.
+- Request values interpolated with `[ … ]` or quoted-string `{ … }` are shell-quoted before execution.
 - Inputs are validated against their declared types before the command is invoked.
 - `string` and free `json` types are restricted to **stdin only**, so unconstrained text cannot become argv.
 - `binary` bodies are written to a temp file and the path is passed as argv (or streamed via stdin).

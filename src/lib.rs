@@ -6,7 +6,7 @@
 //! - [`parse`] — turns source text into AST (spec parser + Exec sub-parser).
 //! - [`check`] — semantic validation on the AST.
 //! - [`value`] — runtime validation of incoming values against type expressions.
-//! - [`exec`] — runtime: argv assembly + pipeline execution (no shell).
+//! - [`exec`] — runtime: shell rendering, temp-file materialization and execution.
 //! - [`server`] — axum HTTP server gluing the pieces together.
 //! - [`diag`] — diagnostic reporting via ariadne.
 

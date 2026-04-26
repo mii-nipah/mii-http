@@ -144,6 +144,9 @@ fn check_endpoint(ep: &Endpoint, _setup: &Setup, diags: &mut Vec<Diag>) {
                 check_ref(reference, span, &scope, diags);
             }
             ExecStage::Command { tokens, .. } => {
+                if let Some(first) = tokens.first() {
+                    check_executable_token(first, diags);
+                }
                 for t in tokens {
                     check_token(t, &scope, diags);
                 }
@@ -250,7 +253,7 @@ fn check_ref(r: &ValueRef, span: &Span, scope: &RefScope<'_>, diags: &mut Vec<Di
                 schema.fields.iter().any(|f| &f.name == head)
             }
             (Some(BodySpec::Form { fields, .. }), false) if p.len() == 1 => {
-                fields.iter().any(|f| &f.name == &p[0])
+                fields.iter().any(|f| f.name == p[0])
             }
             (Some(_), true) => true,
             (Some(BodySpec::Json { schema: None, .. }), false) => true,
@@ -282,26 +285,38 @@ fn check_argv_safety(r: &ValueRef, span: &Span, ep: &Endpoint, diags: &mut Vec<D
         }
         ValueRef::Path(name) => {
             for seg in &ep.path_segments {
-                if let PathSegment::Param { name: n, ty, .. } = seg {
-                    if n == name {
-                        argv_unsafe_named(ty, "path parameter", n, span, diags);
-                    }
+                if let PathSegment::Param { name: n, ty, .. } = seg
+                    && n == name
+                {
+                    argv_unsafe_named(ty, "path parameter", n, span, diags);
                 }
             }
         }
-        // VAR values come from the server's environment / static literals;
-        // they are not user input, so they're allowed in argv.
-        ValueRef::Var(_) => {}
+        ValueRef::Var(name) => {
+            if let Some(v) = ep.vars.iter().find(|v| &v.name == name)
+                && matches!(v.source, ValueSource::Header { .. })
+            {
+                diags.push(
+                    Diag::error(
+                        format!("VAR `{}` from a request header cannot be passed as argv", name),
+                        span.clone(),
+                        "declare a typed HEADER and reference it directly, or pipe the VAR via stdin",
+                    )
+                    .with_note("header-backed VAR values are request input and have no type declaration"),
+                );
+            }
+        }
         ValueRef::Body { path: p } => match &ep.body {
             Some(BodySpec::String { .. }) => diags.push(Diag::error(
                 "string body cannot be passed as argv",
                 span.clone(),
                 "use stdin (e.g. `$ | command`)",
             )),
+            Some(BodySpec::Binary { .. }) if p.is_empty() => {}
             Some(BodySpec::Binary { .. }) => diags.push(Diag::error(
-                "binary body cannot be passed as argv",
+                "binary body fields cannot be passed as argv",
                 span.clone(),
-                "use stdin (e.g. `$ | command`)",
+                "binary bodies do not have named fields",
             )),
             Some(BodySpec::Json { schema: None, .. }) => diags.push(Diag::error(
                 "untyped JSON body cannot be passed as argv",
@@ -349,17 +364,163 @@ fn argv_unsafe_named(ty: &TypeExpr, kind: &str, name: &str, span: &Span, diags: 
     }
 }
 
+fn check_executable_token(t: &ExecToken, diags: &mut Vec<Diag>) {
+    if token_contains_interpolation(t) {
+        diags.push(Diag::error(
+            "command executable cannot be interpolated",
+            token_span(t),
+            "make the program name a literal in the spec",
+        ));
+    }
+}
+
+fn token_contains_interpolation(t: &ExecToken) -> bool {
+    match t {
+        ExecToken::Text { parts, .. } => parts.iter().any(|p| matches!(p, TextPart::Interp(_))),
+        ExecToken::Group { pieces, .. } => pieces
+            .iter()
+            .flat_map(|piece| piece.parts.iter())
+            .any(|p| matches!(p, TextPart::Interp(_))),
+    }
+}
+
+fn token_span(t: &ExecToken) -> Span {
+    match t {
+        ExecToken::Text { span, .. } | ExecToken::Group { span, .. } => span.clone(),
+    }
+}
+
 fn check_token(t: &ExecToken, scope: &RefScope<'_>, diags: &mut Vec<Diag>) {
     let parts_iter: Box<dyn Iterator<Item = (&Span, &Vec<TextPart>)>> = match t {
-        ExecToken::Text { parts, span } => Box::new(std::iter::once((span, parts))),
+        ExecToken::Text { parts, span, .. } => Box::new(std::iter::once((span, parts))),
         ExecToken::Group { pieces, span } => Box::new(pieces.iter().map(move |p| (span, &p.parts))),
     };
     for (span, parts) in parts_iter {
         for p in parts {
-            if let TextPart::Interp(r) = p {
-                check_ref(r, span, scope, diags);
-                check_argv_safety(r, span, scope.ep, diags);
+            match p {
+                TextPart::Interp(r) => {
+                    check_ref(r, span, scope, diags);
+                    check_argv_safety(r, span, scope.ep, diags);
+                }
+                TextPart::Literal(s) => check_bare_reference_literals(s, span, scope, diags),
             }
         }
     }
+}
+
+fn check_bare_reference_literals(
+    text: &str,
+    span: &Span,
+    scope: &RefScope<'_>,
+    diags: &mut Vec<Diag>,
+) {
+    for bare in bare_reference_candidates(text, scope) {
+        diags.push(
+            Diag::warning(
+                format!("bare Exec reference `{}` is not interpolated", bare),
+                span.clone(),
+                "wrap shell pieces in `[...]`, or use `{...}` inside a quoted string",
+            )
+            .with_note(format!(
+                "write `[{}]` for a shell piece, or escape it as `\\{}` for literal text",
+                bare, bare
+            )),
+        );
+    }
+}
+
+fn bare_reference_candidates(text: &str, scope: &RefScope<'_>) -> Vec<String> {
+    let mut out = Vec::new();
+    for (idx, ch) in text.char_indices() {
+        if is_escaped(text, idx) {
+            continue;
+        }
+        match ch {
+            '%' | ':' | '^' | '@' => {
+                let rest = &text[idx + ch.len_utf8()..];
+                let Some((name, _)) = take_ident(rest) else {
+                    continue;
+                };
+                if bare_named_ref_exists(ch, name, scope) {
+                    out.push(format!("{}{}", ch, name));
+                }
+            }
+            '$' => {
+                let rest = &text[idx + 1..];
+                if let Some(path) = rest.strip_prefix('.') {
+                    let Some((parts, _)) = take_body_path(path) else {
+                        continue;
+                    };
+                    if body_ref_exists(&parts, scope.ep) {
+                        out.push(format!("$.{}", parts.join(".")));
+                    }
+                } else if rest.is_empty() && scope.ep.body.is_some() {
+                    out.push("$".into());
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn bare_named_ref_exists(sigil: char, name: &str, scope: &RefScope<'_>) -> bool {
+    match sigil {
+        '%' => scope.query.contains(name),
+        ':' => scope.path.contains(name),
+        '^' => scope.headers.contains(name),
+        '@' => scope.vars.contains(name),
+        _ => false,
+    }
+}
+
+fn body_ref_exists(path: &[String], ep: &Endpoint) -> bool {
+    match &ep.body {
+        Some(BodySpec::Json {
+            schema: Some(schema),
+            ..
+        }) => path
+            .first()
+            .is_some_and(|head| schema.fields.iter().any(|f| &f.name == head)),
+        Some(BodySpec::Form { fields, .. }) if path.len() == 1 => {
+            fields.iter().any(|f| f.name == path[0])
+        }
+        Some(BodySpec::Json { schema: None, .. }) => true,
+        _ => false,
+    }
+}
+
+fn take_body_path(mut rest: &str) -> Option<(Vec<String>, &str)> {
+    let mut parts = Vec::new();
+    loop {
+        let (part, after) = take_ident(rest)?;
+        parts.push(part.to_string());
+        rest = after;
+        let Some(after_dot) = rest.strip_prefix('.') else {
+            break;
+        };
+        rest = after_dot;
+    }
+    Some((parts, rest))
+}
+
+fn take_ident(rest: &str) -> Option<(&str, &str)> {
+    let end = rest
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .map(|(idx, c)| idx + c.len_utf8())
+        .last()?;
+    Some(rest.split_at(end))
+}
+
+fn is_escaped(text: &str, idx: usize) -> bool {
+    let mut count = 0;
+    for ch in text[..idx].chars().rev() {
+        if ch == '\\' {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    count % 2 == 1
 }

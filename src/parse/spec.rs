@@ -738,49 +738,49 @@ pub fn parse_type_expr(s: &str, offset: usize) -> Result<TypeExpr, Diag> {
         }
     }
     // int range / float range
-    if let Some(rest) = s.strip_prefix("int(") {
-        if let Some(inner) = rest.strip_suffix(')') {
-            let parts: Vec<&str> = inner.splitn(2, "..").collect();
-            if parts.len() == 2 {
-                if let (Ok(a), Ok(b)) = (
-                    parts[0].trim().parse::<i64>(),
-                    parts[1].trim().parse::<i64>(),
-                ) {
-                    return Ok(TypeExpr::IntRange {
-                        min: a,
-                        max: b,
-                        span: offset..offset + s.len(),
-                    });
-                }
-            }
-            return Err(Diag::error(
-                "invalid int range",
-                offset..offset + s.len(),
-                "expected `int(a..b)`",
-            ));
+    if let Some(rest) = s.strip_prefix("int(")
+        && let Some(inner) = rest.strip_suffix(')')
+    {
+        let parts: Vec<&str> = inner.splitn(2, "..").collect();
+        if parts.len() == 2
+            && let (Ok(a), Ok(b)) = (
+                parts[0].trim().parse::<i64>(),
+                parts[1].trim().parse::<i64>(),
+            )
+        {
+            return Ok(TypeExpr::IntRange {
+                min: a,
+                max: b,
+                span: offset..offset + s.len(),
+            });
         }
+        return Err(Diag::error(
+            "invalid int range",
+            offset..offset + s.len(),
+            "expected `int(a..b)`",
+        ));
     }
-    if let Some(rest) = s.strip_prefix("float(") {
-        if let Some(inner) = rest.strip_suffix(')') {
-            let parts: Vec<&str> = inner.splitn(2, "..").collect();
-            if parts.len() == 2 {
-                if let (Ok(a), Ok(b)) = (
-                    parts[0].trim().parse::<f64>(),
-                    parts[1].trim().parse::<f64>(),
-                ) {
-                    return Ok(TypeExpr::FloatRange {
-                        min: a,
-                        max: b,
-                        span: offset..offset + s.len(),
-                    });
-                }
-            }
-            return Err(Diag::error(
-                "invalid float range",
-                offset..offset + s.len(),
-                "expected `float(a..b)`",
-            ));
+    if let Some(rest) = s.strip_prefix("float(")
+        && let Some(inner) = rest.strip_suffix(')')
+    {
+        let parts: Vec<&str> = inner.splitn(2, "..").collect();
+        if parts.len() == 2
+            && let (Ok(a), Ok(b)) = (
+                parts[0].trim().parse::<f64>(),
+                parts[1].trim().parse::<f64>(),
+            )
+        {
+            return Ok(TypeExpr::FloatRange {
+                min: a,
+                max: b,
+                span: offset..offset + s.len(),
+            });
         }
+        return Err(Diag::error(
+            "invalid float range",
+            offset..offset + s.len(),
+            "expected `float(a..b)`",
+        ));
     }
     match s {
         "int" => Ok(TypeExpr::Int),

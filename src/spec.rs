@@ -204,9 +204,13 @@ pub enum ExecStage {
 
 #[derive(Debug, Clone)]
 pub enum ExecToken {
-    /// A token built from text + `{...}` interpolations. Always emitted.
-    Text { parts: Vec<TextPart>, span: Span },
-    /// A `[...]` group: zero or more pieces; if any required interp is missing, omit whole group.
+    /// A token built from text + quoted-string `{...}` interpolations. Always emitted.
+    Text {
+        parts: Vec<TextPart>,
+        force_quote: bool,
+        span: Span,
+    },
+    /// A `[...]` shell-piece group; if any interpolation is missing, omit the whole group.
     Group { pieces: Vec<GroupPiece>, span: Span },
 }
 
@@ -219,6 +223,7 @@ pub enum TextPart {
 #[derive(Debug, Clone)]
 pub struct GroupPiece {
     pub parts: Vec<TextPart>,
+    pub force_quote: bool,
 }
 
 #[derive(Debug, Clone)]

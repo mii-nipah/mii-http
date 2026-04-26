@@ -9,8 +9,9 @@
 //!   command   := token (ws+ token)*
 //!   token     := group | text
 //!   group     := "[" piece (ws+ piece)* "]"
-//!   piece     := text-without-spaces             (with `{...}` interpolations)
-//!   text      := (literal | "{" value_ref "}" | quoted_str)+
+//!   piece     := text-without-spaces | value_ref | quoted_str
+//!   text      := (literal | quoted_str)+
+//!   quoted    := quote (literal | "{" value_ref "}")* quote
 //!   value_ref := "%" ident | ":" ident | "^" ident | "@" ident
 //!              | "$" | "$." ident ("." ident)*
 //!
@@ -64,7 +65,6 @@ fn value_ref_parser<'a>() -> impl Parser<'a, &'a str, ValueRef, Extra<'a>> + Clo
     let body_path = just('.')
         .ignore_then(
             dotted_ident
-                .clone()
                 .separated_by(just('.'))
                 .at_least(1)
                 .collect::<Vec<_>>(),
@@ -90,19 +90,30 @@ fn interp_parser<'a>() -> impl Parser<'a, &'a str, ValueRef, Extra<'a>> + Clone 
         .then_ignore(just('}'))
 }
 
-fn quoted_str<'a>(quote: char) -> impl Parser<'a, &'a str, String, Extra<'a>> + Clone {
-    let escape = just('\\').ignore_then(any().map(|c: char| c));
-    let normal = any().filter(move |c: &char| *c != quote && *c != '\\');
+fn quoted_parts<'a>(quote: char) -> impl Parser<'a, &'a str, Vec<TextPart>, Extra<'a>> + Clone {
+    let interp = interp_parser().map(TextPart::Interp);
+    let escape = just('\\').ignore_then(any().map(|c: char| TextPart::Literal(c.to_string())));
+    let literal = any()
+        .filter(move |c: &char| *c != quote && *c != '\\' && *c != '{')
+        .repeated()
+        .at_least(1)
+        .collect::<String>()
+        .map(TextPart::Literal);
     just(quote)
-        .ignore_then(choice((escape, normal)).repeated().collect::<String>())
+        .ignore_then(
+            choice((interp, escape, literal))
+                .repeated()
+                .collect::<Vec<_>>()
+                .map(merge_literals),
+        )
         .then_ignore(just(quote))
 }
 
-/// A "text token" is a sequence of literal chunks, interpolations and quoted
-/// strings, terminated by whitespace or a special char (`[`, `|`, `]`).
-fn text_token_parser<'a>() -> impl Parser<'a, &'a str, Vec<TextPart>, Extra<'a>> + Clone {
-    let interp = interp_parser().map(TextPart::Interp);
-    let quoted = choice((quoted_str('"'), quoted_str('\''))).map(TextPart::Literal);
+/// A "text token" is a sequence of literal chunks and quoted strings,
+/// terminated by whitespace or a special char (`[`, `|`, `]`). `{...}`
+/// interpolation is accepted only inside quoted strings.
+fn text_token_parser<'a>() -> impl Parser<'a, &'a str, (Vec<TextPart>, bool), Extra<'a>> + Clone {
+    let quoted = choice((quoted_parts('"'), quoted_parts('\''))).map(|parts| (parts, true));
     let bare = any()
         .filter(|c: &char| {
             !c.is_whitespace()
@@ -116,21 +127,28 @@ fn text_token_parser<'a>() -> impl Parser<'a, &'a str, Vec<TextPart>, Extra<'a>>
         .repeated()
         .at_least(1)
         .collect::<String>()
-        .map(TextPart::Literal);
-    choice((interp, quoted, bare))
+        .map(|s| (vec![TextPart::Literal(s)], false));
+    choice((quoted, bare))
         .repeated()
         .at_least(1)
         .collect::<Vec<_>>()
-        .map(merge_literals)
+        .map(|chunks| {
+            let mut parts = Vec::new();
+            let mut force_quote = false;
+            for (mut chunk_parts, quoted) in chunks {
+                force_quote |= quoted;
+                parts.append(&mut chunk_parts);
+            }
+            (merge_literals(parts), force_quote)
+        })
 }
 
 /// Inside a `[...]` group: pieces are whitespace-separated. A piece may be a
-/// bare value ref (e.g. `%name`, `:user_id`, `$.user.name`), a quoted string,
-/// or a literal mixed with `{...}` interps.
+/// bare value ref (e.g. `%name`, `:user_id`, `$.user.name`), a quoted string
+/// with `{...}` interpolation, or literal text mixed with those forms.
 fn group_piece_parser<'a>() -> impl Parser<'a, &'a str, GroupPiece, Extra<'a>> + Clone {
-    let interp = interp_parser().map(TextPart::Interp);
-    let bare_ref = value_ref_parser().map(TextPart::Interp);
-    let quoted = choice((quoted_str('"'), quoted_str('\''))).map(TextPart::Literal);
+    let bare_ref = value_ref_parser().map(|r| (vec![TextPart::Interp(r)], false));
+    let quoted = choice((quoted_parts('"'), quoted_parts('\''))).map(|parts| (parts, true));
     let bare = any()
         .filter(|c: &char| {
             !c.is_whitespace()
@@ -150,13 +168,22 @@ fn group_piece_parser<'a>() -> impl Parser<'a, &'a str, GroupPiece, Extra<'a>> +
         .repeated()
         .at_least(1)
         .collect::<String>()
-        .map(TextPart::Literal);
-    choice((interp, bare_ref, quoted, bare))
+        .map(|s| (vec![TextPart::Literal(s)], false));
+    choice((bare_ref, quoted, bare))
         .repeated()
         .at_least(1)
         .collect::<Vec<_>>()
-        .map(|parts| GroupPiece {
-            parts: merge_literals(parts),
+        .map(|chunks| {
+            let mut parts = Vec::new();
+            let mut force_quote = false;
+            for (mut chunk_parts, quoted) in chunks {
+                force_quote |= quoted;
+                parts.append(&mut chunk_parts);
+            }
+            GroupPiece {
+                parts: merge_literals(parts),
+                force_quote,
+            }
         })
 }
 
@@ -200,10 +227,11 @@ fn group_parser<'a>() -> impl Parser<'a, &'a str, ExecToken, Extra<'a>> + Clone 
 fn token_parser<'a>() -> impl Parser<'a, &'a str, ExecToken, Extra<'a>> + Clone {
     choice((
         group_parser(),
-        text_token_parser().map_with(|parts, e| {
+        text_token_parser().map_with(|(parts, force_quote), e| {
             let span: SimpleSpan = e.span();
             ExecToken::Text {
                 parts,
+                force_quote,
                 span: span.start..span.end,
             }
         }),
@@ -270,8 +298,13 @@ fn shift_stage(s: ExecStage, base: usize) -> ExecStage {
 
 fn shift_token(t: ExecToken, base: usize) -> ExecToken {
     match t {
-        ExecToken::Text { parts, span } => ExecToken::Text {
+        ExecToken::Text {
             parts,
+            force_quote,
+            span,
+        } => ExecToken::Text {
+            parts,
+            force_quote,
             span: (span.start + base)..(span.end + base),
         },
         ExecToken::Group { pieces, span } => ExecToken::Group {
