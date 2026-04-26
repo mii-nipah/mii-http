@@ -7,9 +7,9 @@ use axum::{
     Router,
     body::Bytes,
     extract::{Path as AxPath, Query, State},
-    http::{HeaderMap, HeaderName, Method as HttpMethod, StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{MethodRouter, get, post, put, delete, patch},
+    routing::{MethodFilter, MethodRouter},
 };
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
@@ -64,17 +64,16 @@ fn build_router(state: AppState) -> Router {
 
     for (idx, ep) in state.spec.endpoints.iter().enumerate() {
         let path = format!("{}{}", prefix, axum_path(&ep.path_segments));
-        let method = ep.method;
-        let handler = MethodRouter::<AppState>::new();
-        let entry = routes.entry(path.clone()).or_insert(handler);
+        let entry = routes.entry(path).or_insert_with(MethodRouter::<AppState>::new);
         let idx_clone = idx;
-        let mr = match method {
-            Method::Get => get(move |s: State<AppState>, p: AxPath<HashMap<String, String>>, q: Query<HashMap<String, String>>, h: HeaderMap, b: Bytes| handle(s, p, q, h, b, idx_clone)),
-            Method::Post => post(move |s: State<AppState>, p: AxPath<HashMap<String, String>>, q: Query<HashMap<String, String>>, h: HeaderMap, b: Bytes| handle(s, p, q, h, b, idx_clone)),
-            Method::Put => put(move |s: State<AppState>, p: AxPath<HashMap<String, String>>, q: Query<HashMap<String, String>>, h: HeaderMap, b: Bytes| handle(s, p, q, h, b, idx_clone)),
-            Method::Delete => delete(move |s: State<AppState>, p: AxPath<HashMap<String, String>>, q: Query<HashMap<String, String>>, h: HeaderMap, b: Bytes| handle(s, p, q, h, b, idx_clone)),
-            Method::Patch => patch(move |s: State<AppState>, p: AxPath<HashMap<String, String>>, q: Query<HashMap<String, String>>, h: HeaderMap, b: Bytes| handle(s, p, q, h, b, idx_clone)),
-        };
+        let mr = MethodRouter::<AppState>::new().on(
+            method_filter(ep.method),
+            move |s: State<AppState>,
+                  p: AxPath<HashMap<String, String>>,
+                  q: Query<HashMap<String, String>>,
+                  h: HeaderMap,
+                  b: Bytes| handle(s, p, q, h, b, idx_clone),
+        );
         let merged = std::mem::take(entry).merge(mr);
         *entry = merged;
     }
@@ -84,6 +83,16 @@ fn build_router(state: AppState) -> Router {
         router = router.route(&path, mr);
     }
     router.with_state(state)
+}
+
+fn method_filter(m: Method) -> MethodFilter {
+    match m {
+        Method::Get => MethodFilter::GET,
+        Method::Post => MethodFilter::POST,
+        Method::Put => MethodFilter::PUT,
+        Method::Delete => MethodFilter::DELETE,
+        Method::Patch => MethodFilter::PATCH,
+    }
 }
 
 fn compute_prefix(setup: &Setup) -> String {
@@ -142,150 +151,15 @@ async fn handle_inner(
 ) -> Result<Response, HandlerError> {
     let setup = &state.spec.setup;
 
-    // Body size check
-    if let Some(max) = setup.max_body_size {
-        if body.len() as u64 > max {
-            return Err(HandlerError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!("body exceeds max size of {} bytes", max),
-            ));
-        }
-    }
-
-    // Authentication
-    if let Some(AuthSpec::BearerHeader { header: hname, .. }) = &setup.auth {
-        let token = extract_bearer(&headers, hname)?;
-        verify_token(state, &token)?;
-    }
-
-    // Validate query params
-    let mut q_map = BTreeMap::new();
-    for f in &ep.query_params {
-        match query.get(&f.name) {
-            Some(v) => {
-                if let Some(max) = setup.max_query_param_size {
-                    if v.len() as u64 > max {
-                        return Err(HandlerError::new(
-                            StatusCode::URI_TOO_LONG,
-                            format!("query param `{}` exceeds max size", f.name),
-                        ));
-                    }
-                }
-                check_validation(value::validate_text(v, &f.ty), &format!("query `{}`", f.name))?;
-                q_map.insert(f.name.clone(), v.clone());
-            }
-            None => {
-                if !f.optional {
-                    return Err(HandlerError::new(
-                        StatusCode::BAD_REQUEST,
-                        format!("missing query parameter `{}`", f.name),
-                    ));
-                }
-            }
-        }
-    }
-
-    // Validate headers
-    let mut h_map = BTreeMap::new();
-    for f in &ep.headers {
-        let v = header_get(&headers, &f.name);
-        match v {
-            Some(v) => {
-                if let Some(max) = setup.max_header_size {
-                    if v.len() as u64 > max {
-                        return Err(HandlerError::new(
-                            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-                            format!("header `{}` exceeds max size", f.name),
-                        ));
-                    }
-                }
-                check_validation(value::validate_text(&v, &f.ty), &format!("header `{}`", f.name))?;
-                h_map.insert(f.name.clone(), v);
-            }
-            None => {
-                if !f.optional {
-                    return Err(HandlerError::new(
-                        StatusCode::BAD_REQUEST,
-                        format!("missing header `{}`", f.name),
-                    ));
-                }
-            }
-        }
-    }
-
-    // Validate path params
-    let mut p_map = BTreeMap::new();
-    for seg in &ep.path_segments {
-        if let PathSegment::Param { name, ty, .. } = seg {
-            let v = path
-                .get(name)
-                .ok_or_else(|| HandlerError::new(
-                    StatusCode::BAD_REQUEST,
-                    format!("missing path param `{}`", name),
-                ))?
-                .clone();
-            check_validation(value::validate_text(&v, ty), &format!("path `{}`", name))?;
-            p_map.insert(name.clone(), v);
-        }
-    }
-
-    // Resolve vars
-    let mut v_map = BTreeMap::new();
-    for v in &ep.vars {
-        let resolved = resolve_runtime_source(&v.source, &headers).map_err(|e| {
-            HandlerError::new(StatusCode::INTERNAL_SERVER_ERROR, e)
-        })?;
-        v_map.insert(v.name.clone(), resolved);
-    }
-
-    // Body
-    let body_value = match &ep.body {
-        None => BodyValue::None,
-        Some(BodySpec::String { .. }) => BodyValue::Text(
-            String::from_utf8(body.to_vec()).map_err(|_| {
-                HandlerError::new(StatusCode::BAD_REQUEST, "body is not valid UTF-8")
-            })?,
-        ),
-        Some(BodySpec::Binary { .. }) => BodyValue::Binary(body.clone()),
-        Some(BodySpec::Json { schema, .. }) => {
-            let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
-                HandlerError::new(StatusCode::BAD_REQUEST, format!("invalid JSON body: {}", e))
-            })?;
-            if let Some(schema) = schema {
-                check_validation(value::validate_json(&v, schema), "json body")?;
-            }
-            BodyValue::Json(v)
-        }
-        Some(BodySpec::Form { fields, .. }) => {
-            let parsed: BTreeMap<String, String> = form_urlencoded::parse(&body)
-                .into_owned()
-                .collect();
-            for f in fields {
-                match parsed.get(&f.name) {
-                    Some(v) => check_validation(
-                        value::validate_text(v, &f.ty),
-                        &format!("form field `{}`", f.name),
-                    )?,
-                    None => {
-                        if !f.optional {
-                            return Err(HandlerError::new(
-                                StatusCode::BAD_REQUEST,
-                                format!("missing form field `{}`", f.name),
-                            ));
-                        }
-                    }
-                }
-            }
-            BodyValue::Form(parsed)
-        }
-    };
+    enforce_body_size(setup, &body)?;
+    authenticate(state, &headers)?;
 
     let ctx = ExecContext {
-        query: q_map,
-        path: p_map,
-        headers: h_map,
-        vars: v_map,
-        body: body_value,
+        query: validate_query(setup, ep, &query)?,
+        headers: validate_headers(setup, ep, &headers)?,
+        path: validate_path(ep, &path)?,
+        vars: resolve_vars(ep, &headers)?,
+        body: build_body(ep, body)?,
     };
 
     let timeout = setup.timeout_ms.map(Duration::from_millis);
@@ -328,6 +202,163 @@ async fn handle_inner(
 
 fn check_validation(r: Result<(), ValidationError>, scope: &str) -> Result<(), HandlerError> {
     r.map_err(|e| HandlerError::new(StatusCode::BAD_REQUEST, format!("{}: {}", scope, e.message)))
+}
+
+fn enforce_body_size(setup: &Setup, body: &Bytes) -> Result<(), HandlerError> {
+    if let Some(max) = setup.max_body_size {
+        if body.len() as u64 > max {
+            return Err(HandlerError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("body exceeds max size of {} bytes", max),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<(), HandlerError> {
+    if let Some(AuthSpec::BearerHeader { header: hname, .. }) = &state.spec.setup.auth {
+        let token = extract_bearer(headers, hname)?;
+        verify_token(state, &token)?;
+    }
+    Ok(())
+}
+
+fn enforce_size(
+    actual: usize,
+    max: Option<u64>,
+    status: StatusCode,
+    label: impl FnOnce() -> String,
+) -> Result<(), HandlerError> {
+    if let Some(max) = max {
+        if actual as u64 > max {
+            return Err(HandlerError::new(status, label()));
+        }
+    }
+    Ok(())
+}
+
+fn require_or_optional<T>(
+    found: Option<T>,
+    optional: bool,
+    missing_msg: impl FnOnce() -> String,
+) -> Result<Option<T>, HandlerError> {
+    match found {
+        Some(v) => Ok(Some(v)),
+        None if optional => Ok(None),
+        None => Err(HandlerError::new(StatusCode::BAD_REQUEST, missing_msg())),
+    }
+}
+
+fn validate_query(
+    setup: &Setup,
+    ep: &Endpoint,
+    query: &HashMap<String, String>,
+) -> Result<BTreeMap<String, String>, HandlerError> {
+    let mut out = BTreeMap::new();
+    for f in &ep.query_params {
+        let v = require_or_optional(query.get(&f.name).cloned(), f.optional, || {
+            format!("missing query parameter `{}`", f.name)
+        })?;
+        if let Some(v) = v {
+            enforce_size(v.len(), setup.max_query_param_size, StatusCode::URI_TOO_LONG, || {
+                format!("query param `{}` exceeds max size", f.name)
+            })?;
+            check_validation(value::validate_text(&v, &f.ty), &format!("query `{}`", f.name))?;
+            out.insert(f.name.clone(), v);
+        }
+    }
+    Ok(out)
+}
+
+fn validate_headers(
+    setup: &Setup,
+    ep: &Endpoint,
+    headers: &HeaderMap,
+) -> Result<BTreeMap<String, String>, HandlerError> {
+    let mut out = BTreeMap::new();
+    for f in &ep.headers {
+        let v = require_or_optional(header_get(headers, &f.name), f.optional, || {
+            format!("missing header `{}`", f.name)
+        })?;
+        if let Some(v) = v {
+            enforce_size(
+                v.len(),
+                setup.max_header_size,
+                StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                || format!("header `{}` exceeds max size", f.name),
+            )?;
+            check_validation(value::validate_text(&v, &f.ty), &format!("header `{}`", f.name))?;
+            out.insert(f.name.clone(), v);
+        }
+    }
+    Ok(out)
+}
+
+fn validate_path(
+    ep: &Endpoint,
+    path: &HashMap<String, String>,
+) -> Result<BTreeMap<String, String>, HandlerError> {
+    let mut out = BTreeMap::new();
+    for seg in &ep.path_segments {
+        if let PathSegment::Param { name, ty, .. } = seg {
+            let v = path.get(name).cloned().ok_or_else(|| {
+                HandlerError::new(StatusCode::BAD_REQUEST, format!("missing path param `{}`", name))
+            })?;
+            check_validation(value::validate_text(&v, ty), &format!("path `{}`", name))?;
+            out.insert(name.clone(), v);
+        }
+    }
+    Ok(out)
+}
+
+fn resolve_vars(
+    ep: &Endpoint,
+    headers: &HeaderMap,
+) -> Result<BTreeMap<String, String>, HandlerError> {
+    let mut out = BTreeMap::new();
+    for v in &ep.vars {
+        let resolved = resolve_runtime_source(&v.source, headers)
+            .map_err(|e| HandlerError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        out.insert(v.name.clone(), resolved);
+    }
+    Ok(out)
+}
+
+fn build_body(ep: &Endpoint, body: Bytes) -> Result<BodyValue, HandlerError> {
+    Ok(match &ep.body {
+        None => BodyValue::None,
+        Some(BodySpec::String { .. }) => BodyValue::Text(
+            String::from_utf8(body.to_vec())
+                .map_err(|_| HandlerError::new(StatusCode::BAD_REQUEST, "body is not valid UTF-8"))?,
+        ),
+        Some(BodySpec::Binary { .. }) => BodyValue::Binary(body),
+        Some(BodySpec::Json { schema, .. }) => {
+            let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
+                HandlerError::new(StatusCode::BAD_REQUEST, format!("invalid JSON body: {}", e))
+            })?;
+            if let Some(schema) = schema {
+                check_validation(value::validate_json(&v, schema), "json body")?;
+            }
+            BodyValue::Json(v)
+        }
+        Some(BodySpec::Form { fields, .. }) => {
+            let parsed: BTreeMap<String, String> =
+                form_urlencoded::parse(&body).into_owned().collect();
+            for f in fields {
+                let v = require_or_optional(parsed.get(&f.name), f.optional, || {
+                    format!("missing form field `{}`", f.name)
+                })?;
+                if let Some(v) = v {
+                    check_validation(
+                        value::validate_text(v, &f.ty),
+                        &format!("form field `{}`", f.name),
+                    )?;
+                }
+            }
+            BodyValue::Form(parsed)
+        }
+    })
 }
 
 fn header_get(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -429,9 +460,3 @@ fn error_response(status: StatusCode, msg: &str) -> Response {
     resp
 }
 
-// keep these to silence unused-import warnings if features change
-#[allow(dead_code)]
-fn _force_uses() {
-    let _: HttpMethod = HttpMethod::GET;
-    let _ = HeaderName::from_static("x");
-}

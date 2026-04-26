@@ -376,32 +376,11 @@ impl<'a> Parser<'a> {
 
     fn parse_named_field(&mut self, value: &str, offset: usize) -> Result<NamedField, Diag> {
         // syntax: name[?]: <type>
-        let colon_pos = value.find(':').ok_or_else(|| {
-            Diag::error(
-                "missing `:` in field declaration",
-                offset..offset + value.len(),
-                "expected `name: <type>`",
-            )
-        })?;
-        let head = &value[..colon_pos];
-        let tail = value[colon_pos + 1..].trim_start();
-        let tail_off = offset + colon_pos + 1 + (value[colon_pos + 1..].len() - tail.len());
-        let (name, optional) = if let Some(stripped) = head.strip_suffix('?') {
-            (stripped.trim().to_string(), true)
-        } else {
-            (head.trim().to_string(), false)
-        };
-        if name.is_empty() {
-            return Err(Diag::error(
-                "empty field name",
-                offset..offset + value.len(),
-                "expected a name before `:`",
-            ));
-        }
-        let ty = parse_type_expr(tail, tail_off)?;
+        let head = split_field_head(value, offset)?;
+        let ty = parse_type_expr(head.tail, head.tail_off)?;
         Ok(NamedField {
-            name,
-            optional,
+            name: head.name,
+            optional: head.optional,
             ty,
             span: offset..(offset + value.len()),
         })
@@ -494,35 +473,26 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_form_block(&mut self) -> Vec<NamedField> {
-        let mut out = Vec::new();
-        loop {
-            self.skip_blank_and_comments();
-            let Some((text, off)) = self.peek() else {
-                self.err("unterminated BODY form block", 0..0, "missing `}`");
-                break;
-            };
-            let t = text.trim();
-            if t == "}" {
-                self.cursor += 1;
-                break;
-            }
-            self.cursor += 1;
-            let leading = text.len() - text.trim_start().len();
-            let val = t.trim_end_matches(',').trim();
-            match self.parse_named_field(val, off + leading) {
-                Ok(f) => out.push(f),
-                Err(d) => self.diags.push(d),
-            }
-        }
-        out
+        self.parse_brace_block("BODY form", |this, val, off| this.parse_named_field(val, off))
     }
 
     fn parse_json_block(&mut self) -> Vec<JsonField> {
+        self.parse_brace_block("BODY json", |this, val, off| this.parse_json_field(val, off))
+    }
+
+    /// Generic `{ ... }` block parser used by `BODY form` and `BODY json`.
+    /// Lines are stripped of trailing commas and dispatched to `line_parser`.
+    /// Errors from the line parser are recorded as diagnostics; the block ends
+    /// at the line containing only `}`.
+    fn parse_brace_block<T, F>(&mut self, label: &str, mut line_parser: F) -> Vec<T>
+    where
+        F: FnMut(&mut Self, &str, usize) -> Result<T, Diag>,
+    {
         let mut out = Vec::new();
         loop {
             self.skip_blank_and_comments();
             let Some((text, off)) = self.peek() else {
-                self.err("unterminated BODY json block", 0..0, "missing `}`");
+                self.err(format!("unterminated {} block", label), 0..0, "missing `}`");
                 break;
             };
             let t = text.trim();
@@ -533,7 +503,7 @@ impl<'a> Parser<'a> {
             self.cursor += 1;
             let leading = text.len() - text.trim_start().len();
             let val = t.trim_end_matches(',').trim();
-            match self.parse_json_field(val, off + leading) {
+            match line_parser(self, val, off + leading) {
                 Ok(f) => out.push(f),
                 Err(d) => self.diags.push(d),
             }
@@ -542,40 +512,62 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_json_field(&mut self, value: &str, offset: usize) -> Result<JsonField, Diag> {
-        let colon_pos = value.find(':').ok_or_else(|| {
-            Diag::error(
-                "missing `:` in field declaration",
-                offset..offset + value.len(),
-                "expected `name: <type>`",
-            )
-        })?;
-        let head = &value[..colon_pos];
-        let tail = value[colon_pos + 1..].trim_start();
-        let tail_off = offset + colon_pos + 1 + (value[colon_pos + 1..].len() - tail.len());
-        let (name, optional) = if let Some(stripped) = head.strip_suffix('?') {
-            (stripped.trim().to_string(), true)
+        let head = split_field_head(value, offset)?;
+        let ty = if let Some(inner) = head.tail.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+        {
+            JsonFieldType::Array(parse_type_expr(inner.trim(), head.tail_off + 1)?)
         } else {
-            (head.trim().to_string(), false)
-        };
-        if name.is_empty() {
-            return Err(Diag::error(
-                "empty field name",
-                offset..offset + value.len(),
-                "expected a name before `:`",
-            ));
-        }
-        let ty = if let Some(inner) = tail.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            JsonFieldType::Array(parse_type_expr(inner.trim(), tail_off + 1)?)
-        } else {
-            JsonFieldType::Scalar(parse_type_expr(tail, tail_off)?)
+            JsonFieldType::Scalar(parse_type_expr(head.tail, head.tail_off)?)
         };
         Ok(JsonField {
-            name,
-            optional,
+            name: head.name,
+            optional: head.optional,
             ty,
             span: offset..(offset + value.len()),
         })
     }
+}
+
+/// `name[?]: <rest>` decomposition shared by `parse_named_field` and
+/// `parse_json_field`. Returns the trimmed name, optionality, the substring
+/// after the colon, and that substring's absolute byte offset.
+struct FieldHead<'a> {
+    name: String,
+    optional: bool,
+    tail: &'a str,
+    tail_off: usize,
+}
+
+fn split_field_head(value: &str, offset: usize) -> Result<FieldHead<'_>, Diag> {
+    let colon_pos = value.find(':').ok_or_else(|| {
+        Diag::error(
+            "missing `:` in field declaration",
+            offset..offset + value.len(),
+            "expected `name: <type>`",
+        )
+    })?;
+    let head = &value[..colon_pos];
+    let after = &value[colon_pos + 1..];
+    let tail = after.trim_start();
+    let tail_off = offset + colon_pos + 1 + (after.len() - tail.len());
+    let (name, optional) = if let Some(stripped) = head.strip_suffix('?') {
+        (stripped.trim().to_string(), true)
+    } else {
+        (head.trim().to_string(), false)
+    };
+    if name.is_empty() {
+        return Err(Diag::error(
+            "empty field name",
+            offset..offset + value.len(),
+            "expected a name before `:`",
+        ));
+    }
+    Ok(FieldHead {
+        name,
+        optional,
+        tail,
+        tail_off,
+    })
 }
 
 fn split_first_word(s: &str) -> (&str, &str) {
@@ -665,35 +657,23 @@ fn parse_auth(value: &str, offset: usize) -> Result<AuthSpec, Diag> {
 }
 
 fn parse_size(s: &str) -> Option<u64> {
-    let s = s.trim().to_ascii_lowercase();
-    let (num, mult) = if let Some(rest) = s.strip_suffix("kb") {
-        (rest.trim(), 1024u64)
-    } else if let Some(rest) = s.strip_suffix("mb") {
-        (rest.trim(), 1024u64 * 1024)
-    } else if let Some(rest) = s.strip_suffix("gb") {
-        (rest.trim(), 1024u64 * 1024 * 1024)
-    } else if let Some(rest) = s.strip_suffix("b") {
-        (rest.trim(), 1u64)
-    } else {
-        (s.as_str(), 1u64)
-    };
-    let n: u64 = num.trim().parse().ok()?;
-    n.checked_mul(mult)
+    parse_suffixed(s, &[("kb", 1024), ("mb", 1024 * 1024), ("gb", 1024 * 1024 * 1024), ("b", 1)], 1)
 }
 
 fn parse_duration_ms(s: &str) -> Option<u64> {
+    parse_suffixed(s, &[("ms", 1), ("s", 1000), ("m", 60_000)], 1000)
+}
+
+/// Strip a known suffix and multiply the leading integer by its weight.
+/// `default_mult` applies when no suffix matches. Suffixes are tried in order,
+/// so list multi-char suffixes (e.g. `"ms"`) before their prefixes (`"s"`).
+fn parse_suffixed(s: &str, suffixes: &[(&str, u64)], default_mult: u64) -> Option<u64> {
     let s = s.trim().to_ascii_lowercase();
-    let (num, mult) = if let Some(rest) = s.strip_suffix("ms") {
-        (rest.trim(), 1u64)
-    } else if let Some(rest) = s.strip_suffix("s") {
-        (rest.trim(), 1000u64)
-    } else if let Some(rest) = s.strip_suffix("m") {
-        (rest.trim(), 60_000u64)
-    } else {
-        (s.as_str(), 1000u64)
-    };
-    let n: u64 = num.trim().parse().ok()?;
-    n.checked_mul(mult)
+    let (num, mult) = suffixes
+        .iter()
+        .find_map(|(suf, m)| s.strip_suffix(suf).map(|rest| (rest.trim(), *m)))
+        .unwrap_or((s.as_str(), default_mult));
+    num.trim().parse::<u64>().ok()?.checked_mul(mult)
 }
 
 pub fn parse_type_expr(s: &str, offset: usize) -> Result<TypeExpr, Diag> {

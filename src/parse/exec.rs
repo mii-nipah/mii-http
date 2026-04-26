@@ -95,13 +95,6 @@ fn interp_parser<'a>() -> impl Parser<'a, &'a str, ValueRef, Extra<'a>> + Clone 
         .then_ignore(just('}'))
 }
 
-/// Bare value reference (sigil-prefixed, no braces). Used inside `[...]` groups
-/// and at the stage top-level (where it becomes a Source if it's the only
-/// content in the stage).
-fn bare_ref_parser<'a>() -> impl Parser<'a, &'a str, ValueRef, Extra<'a>> + Clone {
-    value_ref_parser()
-}
-
 fn quoted_str<'a>(quote: char) -> impl Parser<'a, &'a str, String, Extra<'a>> + Clone {
     let escape = just('\\').ignore_then(any().map(|c: char| c));
     let normal = any().filter(move |c: &char| *c != quote && *c != '\\');
@@ -135,7 +128,7 @@ fn text_token_parser<'a>() -> impl Parser<'a, &'a str, Vec<TextPart>, Extra<'a>>
 /// or a literal mixed with `{...}` interps.
 fn group_piece_parser<'a>() -> impl Parser<'a, &'a str, GroupPiece, Extra<'a>> + Clone {
     let interp = interp_parser().map(TextPart::Interp);
-    let bare_ref = bare_ref_parser().map(TextPart::Interp);
+    let bare_ref = value_ref_parser().map(TextPart::Interp);
     let quoted = choice((quoted_str('"'), quoted_str('\''))).map(TextPart::Literal);
     let bare = any()
         .filter(|c: &char| {
@@ -221,7 +214,7 @@ fn stage_parser<'a>() -> impl Parser<'a, &'a str, ExecStage, Extra<'a>> + Clone 
     // command stage. The Source path requires the ref to be alone (only ws
     // before the next `|` or end).
     let source_only = hws()
-        .ignore_then(bare_ref_parser())
+        .ignore_then(value_ref_parser())
         .then_ignore(hws())
         .then_ignore(choice((just('|').rewind().ignored(), end())))
         .map_with(|reference, e| {

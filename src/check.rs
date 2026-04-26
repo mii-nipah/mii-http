@@ -127,32 +127,21 @@ fn check_endpoint(ep: &Endpoint, _setup: &Setup, diags: &mut Vec<Diag>) {
     }
 
     // exec references resolve
-    let query_names: HashSet<&str> = ep.query_params.iter().map(|f| f.name.as_str()).collect();
-    let header_names: HashSet<&str> = ep.headers.iter().map(|f| f.name.as_str()).collect();
+    let scope = RefScope {
+        query: ep.query_params.iter().map(|f| f.name.as_str()).collect(),
+        headers: ep.headers.iter().map(|f| f.name.as_str()).collect(),
+        path: path_params,
+        vars: var_names,
+        ep,
+    };
     for stage in &ep.exec.pipeline {
         match stage {
-            ExecStage::Source { reference, span } => check_ref(
-                reference,
-                span,
-                &query_names,
-                &header_names,
-                &path_params,
-                &var_names,
-                ep,
-                diags,
-                /*as_argv=*/ false,
-            ),
+            ExecStage::Source { reference, span } => {
+                check_ref(reference, span, &scope, diags);
+            }
             ExecStage::Command { tokens, .. } => {
                 for t in tokens {
-                    check_token(
-                        t,
-                        &query_names,
-                        &header_names,
-                        &path_params,
-                        &var_names,
-                        ep,
-                        diags,
-                    );
+                    check_token(t, &scope, diags);
                 }
             }
         }
@@ -229,22 +218,26 @@ fn security_check_type(ty: &TypeExpr, span: &Span, diags: &mut Vec<Diag>) {
     }
 }
 
-fn check_ref(
-    r: &ValueRef,
-    span: &Span,
-    query: &HashSet<&str>,
-    headers: &HashSet<&str>,
-    path: &HashSet<&str>,
-    vars: &HashSet<&str>,
-    ep: &Endpoint,
-    diags: &mut Vec<Diag>,
-    as_argv: bool,
-) {
+/// All names declared on an endpoint that an Exec reference can resolve to,
+/// plus a back-pointer to the endpoint for body-schema lookups.
+struct RefScope<'a> {
+    query: HashSet<&'a str>,
+    headers: HashSet<&'a str>,
+    path: HashSet<&'a str>,
+    vars: HashSet<&'a str>,
+    ep: &'a Endpoint,
+}
+
+/// Verify that a `ValueRef` resolves to something declared on the endpoint.
+/// Argv-context safety (forbidding unconstrained types as command arguments)
+/// is handled separately by [`check_argv_safety`].
+fn check_ref(r: &ValueRef, span: &Span, scope: &RefScope<'_>, diags: &mut Vec<Diag>) {
+    let ep = scope.ep;
     let ok = match r {
-        ValueRef::Query(n) => query.contains(n.as_str()),
-        ValueRef::Header(n) => headers.contains(n.as_str()),
-        ValueRef::Path(n) => path.contains(n.as_str()),
-        ValueRef::Var(n) => vars.contains(n.as_str()),
+        ValueRef::Query(n) => scope.query.contains(n.as_str()),
+        ValueRef::Header(n) => scope.headers.contains(n.as_str()),
+        ValueRef::Path(n) => scope.path.contains(n.as_str()),
+        ValueRef::Var(n) => scope.vars.contains(n.as_str()),
         ValueRef::Body { path: p } => match (&ep.body, p.is_empty()) {
             (Some(BodySpec::Json { schema: Some(schema), .. }), false) => {
                 let head = &p[0];
@@ -265,73 +258,64 @@ fn check_ref(
             "no such field declared on this endpoint",
         ));
     }
+}
 
-    // Argv safety: body of unconstrained type as argv is unsafe
-    if as_argv {
-        if let ValueRef::Body { path: p } = r {
-            match &ep.body {
-                Some(BodySpec::String { .. }) => diags.push(Diag::error(
-                    "string body cannot be passed as argv",
-                    span.clone(),
-                    "use stdin (e.g. `$ | command`)",
-                )),
-                Some(BodySpec::Binary { .. }) => diags.push(Diag::error(
-                    "binary body cannot be passed as argv",
-                    span.clone(),
-                    "use stdin (e.g. `$ | command`)",
-                )),
-                Some(BodySpec::Json { schema: None, .. }) => diags.push(Diag::error(
-                    "untyped JSON body cannot be passed as argv",
-                    span.clone(),
-                    "declare a JSON schema with safe types, or use stdin",
-                )),
-                Some(BodySpec::Json {
-                    schema: Some(schema),
-                    ..
-                }) if !p.is_empty() => {
-                    if let Some(field) = schema.fields.iter().find(|f| f.name == p[0]) {
-                        let inner = match &field.ty {
-                            JsonFieldType::Scalar(t) | JsonFieldType::Array(t) => t,
-                        };
-                        if matches!(inner, TypeExpr::String | TypeExpr::Json) {
-                            diags.push(Diag::error(
-                                format!("body field `{}` of type `{}` cannot be passed as argv", p.join("."), inner.name()),
-                                span.clone(),
-                                "use a constrained type or stdin",
-                            ));
-                        }
-                    }
+/// Reject references that, used as a command argv token, would expose
+/// unconstrained user input directly to the command line.
+fn check_argv_safety(r: &ValueRef, span: &Span, ep: &Endpoint, diags: &mut Vec<Diag>) {
+    let ValueRef::Body { path: p } = r else {
+        return;
+    };
+    match &ep.body {
+        Some(BodySpec::String { .. }) => diags.push(Diag::error(
+            "string body cannot be passed as argv",
+            span.clone(),
+            "use stdin (e.g. `$ | command`)",
+        )),
+        Some(BodySpec::Binary { .. }) => diags.push(Diag::error(
+            "binary body cannot be passed as argv",
+            span.clone(),
+            "use stdin (e.g. `$ | command`)",
+        )),
+        Some(BodySpec::Json { schema: None, .. }) => diags.push(Diag::error(
+            "untyped JSON body cannot be passed as argv",
+            span.clone(),
+            "declare a JSON schema with safe types, or use stdin",
+        )),
+        Some(BodySpec::Json { schema: Some(schema), .. }) if !p.is_empty() => {
+            if let Some(field) = schema.fields.iter().find(|f| f.name == p[0]) {
+                let inner = match &field.ty {
+                    JsonFieldType::Scalar(t) | JsonFieldType::Array(t) => t,
+                };
+                if matches!(inner, TypeExpr::String | TypeExpr::Json) {
+                    diags.push(Diag::error(
+                        format!(
+                            "body field `{}` of type `{}` cannot be passed as argv",
+                            p.join("."),
+                            inner.name()
+                        ),
+                        span.clone(),
+                        "use a constrained type or stdin",
+                    ));
                 }
-                _ => {}
             }
         }
+        _ => {}
     }
 }
 
-fn check_token(
-    t: &ExecToken,
-    query: &HashSet<&str>,
-    headers: &HashSet<&str>,
-    path: &HashSet<&str>,
-    vars: &HashSet<&str>,
-    ep: &Endpoint,
-    diags: &mut Vec<Diag>,
-) {
-    match t {
-        ExecToken::Text { parts, span } => {
-            for p in parts {
-                if let TextPart::Interp(r) = p {
-                    check_ref(r, span, query, headers, path, vars, ep, diags, true);
-                }
-            }
-        }
+fn check_token(t: &ExecToken, scope: &RefScope<'_>, diags: &mut Vec<Diag>) {
+    let parts_iter: Box<dyn Iterator<Item = (&Span, &Vec<TextPart>)>> = match t {
+        ExecToken::Text { parts, span } => Box::new(std::iter::once((span, parts))),
         ExecToken::Group { pieces, span } => {
-            for piece in pieces {
-                for p in &piece.parts {
-                    if let TextPart::Interp(r) = p {
-                        check_ref(r, span, query, headers, path, vars, ep, diags, true);
-                    }
-                }
+            Box::new(pieces.iter().map(move |p| (span, &p.parts)))
+        }
+    };
+    for (span, parts) in parts_iter {
+        for p in parts {
+            if let TextPart::Interp(r) = p {
+                check_ref(r, span, scope, diags);
+                check_argv_safety(r, span, scope.ep, diags);
             }
         }
     }

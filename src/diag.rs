@@ -1,7 +1,6 @@
-//! Diagnostic helpers using ariadne. Also bridges chumsky `Rich` errors.
+//! Diagnostic helpers using ariadne.
 
 use ariadne::{Color, Label, Report, ReportKind, Source};
-use chumsky::error::Rich;
 use std::ops::Range;
 
 #[derive(Debug, Clone)]
@@ -80,21 +79,4 @@ pub fn emit_all(diags: &[Diag], file_name: &str, source: &str) {
     for d in diags {
         d.emit(file_name, source);
     }
-}
-
-/// Convert chumsky `Rich` errors (parsed over a slice that starts at `base_offset`
-/// inside the original source) into our `Diag` type.
-pub fn from_chumsky<T: std::fmt::Display>(
-    errs: Vec<Rich<'_, T>>,
-    base_offset: usize,
-    context: &str,
-) -> Vec<Diag> {
-    errs.into_iter()
-        .map(|e| {
-            let span = e.span();
-            let s = base_offset + span.start;
-            let end = base_offset + span.end;
-            Diag::error(format!("{}: {}", context, e), s..end, "syntax error")
-        })
-        .collect()
 }
