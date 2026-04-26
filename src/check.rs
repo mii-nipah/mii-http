@@ -178,23 +178,16 @@ fn forbid_stdin_only_in_field(
     diags: &mut Vec<Diag>,
     span: &Span,
 ) {
-    match ty {
-        TypeExpr::String => diags.push(Diag::error(
-            format!("`string` type not allowed for {} `{}`", kind, name),
-            span.clone(),
-            "use a regex, union, or another constrained type",
-        ).with_note("`string` is reserved for stdin to avoid command injection")),
-        TypeExpr::Json => diags.push(Diag::error(
-            format!("`json` type not allowed for {} `{}`", kind, name),
-            span.clone(),
-            "use a typed json schema instead",
-        )),
-        TypeExpr::Binary => diags.push(Diag::error(
+    // `string` and `json` (untyped) are allowed to be *declared* on any
+    // field; they are reserved for stdin use, which is enforced at argv
+    // construction time by `check_argv_safety`. Only `binary`, which is
+    // body-only, is rejected at the declaration site.
+    if matches!(ty, TypeExpr::Binary) {
+        diags.push(Diag::error(
             format!("`binary` type only allowed as BODY for {} `{}`", kind, name),
             span.clone(),
             "binary is allowed only on top-level BODY",
-        )),
-        _ => {}
+        ));
     }
 }
 
@@ -264,44 +257,83 @@ fn check_ref(r: &ValueRef, span: &Span, scope: &RefScope<'_>, diags: &mut Vec<Di
 /// Reject references that, used as a command argv token, would expose
 /// unconstrained user input directly to the command line.
 fn check_argv_safety(r: &ValueRef, span: &Span, ep: &Endpoint, diags: &mut Vec<Diag>) {
-    let ValueRef::Body { path: p } = r else {
-        return;
-    };
-    match &ep.body {
-        Some(BodySpec::String { .. }) => diags.push(Diag::error(
-            "string body cannot be passed as argv",
-            span.clone(),
-            "use stdin (e.g. `$ | command`)",
-        )),
-        Some(BodySpec::Binary { .. }) => diags.push(Diag::error(
-            "binary body cannot be passed as argv",
-            span.clone(),
-            "use stdin (e.g. `$ | command`)",
-        )),
-        Some(BodySpec::Json { schema: None, .. }) => diags.push(Diag::error(
-            "untyped JSON body cannot be passed as argv",
-            span.clone(),
-            "declare a JSON schema with safe types, or use stdin",
-        )),
-        Some(BodySpec::Json { schema: Some(schema), .. }) if !p.is_empty() => {
-            if let Some(field) = schema.fields.iter().find(|f| f.name == p[0]) {
-                let inner = match &field.ty {
-                    JsonFieldType::Scalar(t) | JsonFieldType::Array(t) => t,
-                };
-                if matches!(inner, TypeExpr::String | TypeExpr::Json) {
-                    diags.push(Diag::error(
-                        format!(
-                            "body field `{}` of type `{}` cannot be passed as argv",
-                            p.join("."),
-                            inner.name()
-                        ),
-                        span.clone(),
-                        "use a constrained type or stdin",
-                    ));
+    match r {
+        ValueRef::Query(name) => {
+            if let Some(f) = ep.query_params.iter().find(|f| &f.name == name) {
+                argv_unsafe_named(&f.ty, "query parameter", &f.name, span, diags);
+            }
+        }
+        ValueRef::Header(name) => {
+            if let Some(f) = ep.headers.iter().find(|f| &f.name == name) {
+                argv_unsafe_named(&f.ty, "header", &f.name, span, diags);
+            }
+        }
+        ValueRef::Path(name) => {
+            for seg in &ep.path_segments {
+                if let PathSegment::Param { name: n, ty, .. } = seg {
+                    if n == name {
+                        argv_unsafe_named(ty, "path parameter", n, span, diags);
+                    }
                 }
             }
         }
-        _ => {}
+        // VAR values come from the server's environment / static literals;
+        // they are not user input, so they're allowed in argv.
+        ValueRef::Var(_) => {}
+        ValueRef::Body { path: p } => match &ep.body {
+            Some(BodySpec::String { .. }) => diags.push(Diag::error(
+                "string body cannot be passed as argv",
+                span.clone(),
+                "use stdin (e.g. `$ | command`)",
+            )),
+            Some(BodySpec::Binary { .. }) => diags.push(Diag::error(
+                "binary body cannot be passed as argv",
+                span.clone(),
+                "use stdin (e.g. `$ | command`)",
+            )),
+            Some(BodySpec::Json { schema: None, .. }) => diags.push(Diag::error(
+                "untyped JSON body cannot be passed as argv",
+                span.clone(),
+                "declare a JSON schema with safe types, or use stdin",
+            )),
+            Some(BodySpec::Json { schema: Some(schema), .. }) if !p.is_empty() => {
+                if let Some(field) = schema.fields.iter().find(|f| f.name == p[0]) {
+                    let inner = match &field.ty {
+                        JsonFieldType::Scalar(t) | JsonFieldType::Array(t) => t,
+                    };
+                    argv_unsafe_named(inner, "JSON field", &field.name, span, diags);
+                }
+            }
+            Some(BodySpec::Form { fields, .. }) if !p.is_empty() => {
+                if let Some(field) = fields.iter().find(|f| f.name == p[0]) {
+                    argv_unsafe_named(&field.ty, "form field", &field.name, span, diags);
+                }
+            }
+            _ => {}
+        },
+    }
+}
+
+/// Emit an argv-context error for a named field whose declared type is
+/// unconstrained (`string` or `json`). Other types are safe.
+fn argv_unsafe_named(
+    ty: &TypeExpr,
+    kind: &str,
+    name: &str,
+    span: &Span,
+    diags: &mut Vec<Diag>,
+) {
+    if matches!(ty, TypeExpr::String | TypeExpr::Json) {
+        diags.push(Diag::error(
+            format!(
+                "{} `{}` of type `{}` cannot be passed as argv",
+                kind,
+                name,
+                ty.name()
+            ),
+            span.clone(),
+            "use a constrained type (regex, union, int, ...) or pipe via stdin",
+        ).with_note("`string`/`json` are reserved for stdin to avoid command injection"));
     }
 }
 
