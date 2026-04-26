@@ -51,5 +51,5 @@ Exec: echo X={^X-Custom-Header} O={^X-Optional-Header}
 GET /echovar
 Response-Type text/plain
 VAR greeting [ENV GREETING]
-Exec: echo [@greeting] [%name]
 QUERY name?: /[a-zA-Z0-9_]+/
+Exec: echo [@greeting] [%name]

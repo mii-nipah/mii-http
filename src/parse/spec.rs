@@ -249,8 +249,12 @@ impl<'a> Parser<'a> {
                 break;
             }
             self.cursor += 1;
-            self.parse_endpoint_directive(&mut endpoint, line_text, line_off);
+            let is_exec = self.parse_endpoint_directive(&mut endpoint, line_text, line_off);
             endpoint.span.end = line_off + line_text.len();
+            // Exec terminates the endpoint: nothing after `Exec:` belongs to it.
+            if is_exec {
+                break;
+            }
         }
         if endpoint.exec.raw.is_empty() {
             self.err(
@@ -262,7 +266,7 @@ impl<'a> Parser<'a> {
         Some(endpoint)
     }
 
-    fn parse_endpoint_directive(&mut self, ep: &mut Endpoint, text: &str, offset: usize) {
+    fn parse_endpoint_directive(&mut self, ep: &mut Endpoint, text: &str, offset: usize) -> bool {
         let leading = text.len() - text.trim_start().len();
         let body = text.trim_start();
 
@@ -271,7 +275,7 @@ impl<'a> Parser<'a> {
         if let Some(rest) = body.strip_prefix("Response-Type") {
             let rest = rest.trim_start_matches([':', ' ', '\t']);
             ep.response_type = Some(rest.trim().to_string());
-            return;
+            return false;
         }
         if let Some(rest) = body.strip_prefix("Exec:") {
             let exec_off = offset + leading + "Exec:".len();
@@ -290,7 +294,8 @@ impl<'a> Parser<'a> {
                 span,
                 pipeline,
             };
-            return;
+            ep.span.end = offset + text.len();
+            return true;
         }
 
         let (key, rest) = split_first_word(body);
@@ -320,6 +325,7 @@ impl<'a> Parser<'a> {
                 "expected QUERY, HEADER, VAR, BODY, Response-Type or Exec",
             ),
         }
+        false
     }
 
     fn parse_path(&mut self, path: &str, offset: usize) -> Vec<PathSegment> {
