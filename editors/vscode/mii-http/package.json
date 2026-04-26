@@ -2,7 +2,7 @@
   "name": "mii-http",
   "displayName": "mii-http",
   "description": "Language support for mii-http .http spec files.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "mii-nipah",
   "license": "BSD-3-Clause",
   "repository": {
