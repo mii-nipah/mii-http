@@ -7,6 +7,8 @@ Language support for `mii-http` `.http` spec files.
 - Syntax highlighting for setup directives, endpoints, body schemas and `Exec` references.
 - Diagnostics powered by `mii-http --check --json`, including warnings and exact source ranges.
 - Completions for setup directives, endpoint directives, body kinds, type expressions and in-scope `Exec` references.
+- Hover docs for keywords and typed symbols, including examples for common type expressions.
+- Go to Definition for `Exec` references like `%query`, `:path`, `^Header`, `@var` and `$.bodyField`.
 
 ## Setup
 
