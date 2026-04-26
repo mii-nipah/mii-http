@@ -1,6 +1,6 @@
 [package]
 name = "mii-http"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Turn a .http specs file into a real HTTP server, backed by the shell commands you already have."
 license = "BSD-3-Clause"
