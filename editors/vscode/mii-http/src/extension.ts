@@ -5,6 +5,9 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 const languageId = 'mii-http';
+const configurePathAction = 'Configure path';
+const installWithCargoAction = 'Install with Cargo';
+const missingExecutablePrompts = new Set<string>();
 
 interface CheckReport {
   diagnostics: CheckDiagnostic[];
@@ -71,6 +74,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.workspace.onDidChangeConfiguration(event => {
       if (event.affectsConfiguration('miiHttp')) {
+        missingExecutablePrompts.clear();
         for (const document of vscode.workspace.textDocuments) {
           checker.queue(document, 0);
         }
@@ -132,6 +136,7 @@ class Checker implements vscode.Disposable {
   private async validate(document: vscode.TextDocument): Promise<void> {
     const version = document.version;
     const text = document.getText();
+    let command: CommandSpec | undefined;
     let tempDir: string | undefined;
 
     try {
@@ -139,7 +144,7 @@ class Checker implements vscode.Disposable {
       const tempFile = path.join(tempDir, tempFileName(document));
       await fs.promises.writeFile(tempFile, text, 'utf8');
 
-      const command = resolveCommand(document);
+      command = resolveCommand(document);
       const checkArgs = configuration(document).get<string[]>('checkArgs', ['--check', '--json']);
       const result = await run(command.command, [...command.args, ...checkArgs, tempFile], cwd(document));
       const report = parseReport(result.stdout, result.stderr);
@@ -156,6 +161,7 @@ class Checker implements vscode.Disposable {
         return;
       }
       this.diagnostics.set(document.uri, [checkerFailure(document, error)]);
+      void promptForMissingExecutable(document, error, command);
     } finally {
       if (tempDir) {
         await fs.promises.rm(tempDir, { recursive: true, force: true });
@@ -319,6 +325,61 @@ function run(command: string, args: string[], runCwd: string | undefined): Promi
   });
 }
 
+async function promptForMissingExecutable(
+  document: vscode.TextDocument,
+  error: unknown,
+  command: CommandSpec | undefined
+): Promise<void> {
+  if (!isMissingExecutableError(error)) {
+    return;
+  }
+
+  const attempted = command?.command ?? configuration(document).get<string>('executable', 'mii-http');
+  const promptKey = `${document.uri.toString()}|${attempted}`;
+  if (missingExecutablePrompts.has(promptKey)) {
+    return;
+  }
+  missingExecutablePrompts.add(promptKey);
+
+  const cargoAvailable = await commandAvailable('cargo');
+  const actions = cargoAvailable ? [configurePathAction, installWithCargoAction] : [configurePathAction];
+  const installHint = cargoAvailable ? ' I can install it with `cargo install --locked mii-http`.' : '';
+  const selected = await vscode.window.showWarningMessage(
+    `mii-http could not find \`${attempted}\`. Configure the executable path or make sure it is on PATH.${installHint}`,
+    ...actions
+  );
+
+  if (selected === configurePathAction) {
+    await vscode.commands.executeCommand('workbench.action.openSettings', 'miiHttp.executable');
+    return;
+  }
+  if (selected === installWithCargoAction) {
+    installWithCargo();
+  }
+}
+
+function isMissingExecutableError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+  const maybe = error as { code?: unknown; message?: unknown };
+  return maybe.code === 'ENOENT' || (typeof maybe.message === 'string' && /\bENOENT\b/.test(maybe.message));
+}
+
+function commandAvailable(command: string): Promise<boolean> {
+  return new Promise(resolve => {
+    const child = childProcess.spawn(command, ['--version'], { windowsHide: true });
+    child.on('error', () => resolve(false));
+    child.on('close', code => resolve(code === 0));
+  });
+}
+
+function installWithCargo(): void {
+  const terminal = vscode.window.createTerminal('Install mii-http');
+  terminal.show();
+  terminal.sendText('cargo install --locked mii-http');
+}
+
 function parseReport(stdout: string, stderr: string): CheckReport {
   const start = stdout.indexOf('{');
   if (start < 0) {
@@ -365,7 +426,9 @@ function checkerFailure(document: vscode.TextDocument, error: unknown): vscode.D
   const range = firstLine.range.isEmpty
     ? new vscode.Range(new vscode.Position(0, 0), new vscode.Position(0, 0))
     : new vscode.Range(firstLine.range.start, firstLine.range.start.translate(0, 1));
-  const message = error instanceof Error ? error.message : String(error);
+  const message = isMissingExecutableError(error)
+    ? 'mii-http executable was not found. Install it or configure miiHttp.executable.'
+    : error instanceof Error ? error.message : String(error);
   const diagnostic = new vscode.Diagnostic(
     range,
     `mii-http check failed: ${message}`,

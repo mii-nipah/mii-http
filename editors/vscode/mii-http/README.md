@@ -9,6 +9,7 @@ Language support for `mii-http` `.http` spec files.
 - Completions for setup directives, endpoint directives, body kinds, type expressions and in-scope `Exec` references.
 - Hover docs for keywords and typed symbols, including examples for common type expressions.
 - Go to Definition for `Exec` references like `%query`, `:path`, `^Header`, `@var` and `$.bodyField`.
+- Friendly setup prompt when the `mii-http` executable is missing, with actions to configure the path or install through Cargo when available.
 
 ## Setup
 
