@@ -22,9 +22,11 @@ struct AppState {
     spec: Arc<Spec>,
     auth_secret: Option<Vec<u8>>,
     auth_jwt_verifier: Option<String>,
+    dry_run: bool,
 }
 
-pub async fn serve(spec: Spec, addr: SocketAddr) -> std::io::Result<()> {
+pub async fn serve(spec: Spec, addr: SocketAddr, dry_run: bool) -> std::io::Result<()> {
+    tracing::debug!(addr = %addr, dry_run, endpoints = spec.endpoints.len(), "server::serve");
     let auth_secret = match &spec.setup.token_secret {
         Some(src) => Some(resolve_static_source(src)?.into_bytes()),
         None => None,
@@ -37,10 +39,15 @@ pub async fn serve(spec: Spec, addr: SocketAddr) -> std::io::Result<()> {
         spec: Arc::new(spec),
         auth_secret,
         auth_jwt_verifier,
+        dry_run,
     };
     let router = build_router(state.clone());
     let listener = TcpListener::bind(addr).await?;
-    tracing::info!("mii-http listening on {}", addr);
+    if dry_run {
+        tracing::info!("mii-http listening on {} (dry-run: commands will not be executed)", addr);
+    } else {
+        tracing::info!("mii-http listening on {}", addr);
+    }
     axum::serve(listener, router.into_make_service())
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))
@@ -59,11 +66,13 @@ fn resolve_static_source(src: &ValueSource) -> std::io::Result<String> {
 }
 
 fn build_router(state: AppState) -> Router {
+    tracing::debug!("server::build_router");
     let mut routes: HashMap<String, MethodRouter<AppState>> = HashMap::new();
     let prefix = compute_prefix(&state.spec.setup);
 
     for (idx, ep) in state.spec.endpoints.iter().enumerate() {
         let path = format!("{}{}", prefix, axum_path(&ep.path_segments));
+        tracing::debug!(method = ep.method.as_str(), path = %path, "server::build_router: mounting route");
         let entry = routes.entry(path).or_insert_with(MethodRouter::<AppState>::new);
         let idx_clone = idx;
         let mr = MethodRouter::<AppState>::new().on(
@@ -135,9 +144,13 @@ async fn handle(
         Some(e) => e,
         None => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "endpoint missing"),
     };
+    tracing::info!(method = ep.method.as_str(), path = %ep.path, "server::handle: incoming request");
     match handle_inner(&state, ep, path, query, headers, body).await {
         Ok(r) => r,
-        Err(err) => err.into_response(),
+        Err(err) => {
+            tracing::warn!(method = ep.method.as_str(), path = %ep.path, status = %err.status, error = %err.message, "server::handle: returning error");
+            err.into_response()
+        }
     }
 }
 
@@ -163,6 +176,28 @@ async fn handle_inner(
     };
 
     let timeout = setup.timeout_ms.map(Duration::from_millis);
+
+    if state.dry_run {
+        let preview = exec::preview_pipeline(&ep.exec.pipeline, &ctx);
+        tracing::info!(
+            method = ep.method.as_str(),
+            path = %ep.path,
+            stages = ?preview,
+            "dry-run: skipping execution",
+        );
+        let mut body_text = String::from("[dry-run] would execute:\n");
+        for stage in &preview {
+            body_text.push_str("  ");
+            body_text.push_str(stage);
+            body_text.push('\n');
+        }
+        let mut resp = Response::new(body_text.into());
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        return Ok(resp);
+    }
 
     let ExecOutput {
         status,
@@ -217,6 +252,7 @@ fn enforce_body_size(setup: &Setup, body: &Bytes) -> Result<(), HandlerError> {
 }
 
 fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<(), HandlerError> {
+    tracing::debug!("server::authenticate");
     if let Some(AuthSpec::BearerHeader { header: hname, .. }) = &state.spec.setup.auth {
         let token = extract_bearer(headers, hname)?;
         verify_token(state, &token)?;
@@ -255,6 +291,7 @@ fn validate_query(
     ep: &Endpoint,
     query: &HashMap<String, String>,
 ) -> Result<BTreeMap<String, String>, HandlerError> {
+    tracing::debug!(endpoint = %ep.path, fields = ep.query_params.len(), "server::validate_query");
     let mut out = BTreeMap::new();
     for f in &ep.query_params {
         let v = require_or_optional(query.get(&f.name).cloned(), f.optional, || {
@@ -276,6 +313,7 @@ fn validate_headers(
     ep: &Endpoint,
     headers: &HeaderMap,
 ) -> Result<BTreeMap<String, String>, HandlerError> {
+    tracing::debug!(endpoint = %ep.path, fields = ep.headers.len(), "server::validate_headers");
     let mut out = BTreeMap::new();
     for f in &ep.headers {
         let v = require_or_optional(header_get(headers, &f.name), f.optional, || {
@@ -299,6 +337,7 @@ fn validate_path(
     ep: &Endpoint,
     path: &HashMap<String, String>,
 ) -> Result<BTreeMap<String, String>, HandlerError> {
+    tracing::debug!(endpoint = %ep.path, "server::validate_path");
     let mut out = BTreeMap::new();
     for seg in &ep.path_segments {
         if let PathSegment::Param { name, ty, .. } = seg {
@@ -316,6 +355,7 @@ fn resolve_vars(
     ep: &Endpoint,
     headers: &HeaderMap,
 ) -> Result<BTreeMap<String, String>, HandlerError> {
+    tracing::debug!(endpoint = %ep.path, vars = ep.vars.len(), "server::resolve_vars");
     let mut out = BTreeMap::new();
     for v in &ep.vars {
         let resolved = resolve_runtime_source(&v.source, headers)
@@ -326,6 +366,7 @@ fn resolve_vars(
 }
 
 fn build_body(ep: &Endpoint, body: Bytes) -> Result<BodyValue, HandlerError> {
+    tracing::debug!(endpoint = %ep.path, body_len = body.len(), "server::build_body");
     Ok(match &ep.body {
         None => BodyValue::None,
         Some(BodySpec::String { .. }) => BodyValue::Text(

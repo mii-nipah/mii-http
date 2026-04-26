@@ -5,6 +5,7 @@ use crate::spec::*;
 use std::collections::HashSet;
 
 pub fn check(spec: &Spec) -> Vec<Diag> {
+    tracing::debug!(endpoints = spec.endpoints.len(), "check::check");
     let mut diags = Vec::new();
     check_setup(&spec.setup, &mut diags);
     let mut seen: HashSet<(Method, String)> = HashSet::new();

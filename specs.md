@@ -175,3 +175,9 @@ Query parameters and body schemas can have types, they are:
 
 * `mii-http --check <path>` checks your specs for errors and inconsistencies, it also flags potential security issues (such as using /.*/ on regexes and similar things)
 * `mii-http <path>` runs the server with the specified specs file
+
+* `mii-http --addr <address> <path>` runs the server with the specified specs file and binds it to the specified address, for example `mii-http --addr 0.0.0.0:8080 specs.http` will bind the server to all available interfaces on port 8080
+
+* `mii-http --quiet` runs the server in quiet mode, which means that it will not log any requests or errors to the console, it can be useful for production environments or whatever
+
+* `mii-http --dry-run` runs the server in dry run mode, which means that it will not actually execute the commands defined in the specs file, instead will log the commands that would be executed for each request, it can be useful for testing and debugging your specs file without actually running any command

@@ -20,8 +20,12 @@ pub struct ParseResult {
 }
 
 pub fn parse(source: &str) -> ParseResult {
+    tracing::debug!(bytes = source.len(), "parse::parse");
     let mut p = Parser::new(source);
     let spec = p.parse_spec();
+    let diag_count = p.diags.len();
+    let endpoint_count = spec.as_ref().map(|s| s.endpoints.len()).unwrap_or(0);
+    tracing::debug!(endpoints = endpoint_count, diags = diag_count, "parse::parse done");
     ParseResult {
         spec,
         diags: p.diags,

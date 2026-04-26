@@ -7,21 +7,16 @@ fn print_usage() {
     eprintln!(
         "mii-http — run an HTTP server defined by a .http specs file\n\n\
          Usage:\n  \
-         mii-http <path>            run the server\n  \
-         mii-http --check <path>    validate the specs and exit\n  \
-         mii-http --addr 0.0.0.0:8080 <path>   run on a specific address\n"
+         mii-http <path>                       run the server\n  \
+         mii-http --check <path>               validate the specs and exit\n  \
+         mii-http --addr 0.0.0.0:8080 <path>   run on a specific address\n  \
+         mii-http -q | --quiet <path>          suppress request/error logs\n  \
+         mii-http --dry-run <path>             log commands instead of running them\n"
     );
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         print_usage();
@@ -29,12 +24,16 @@ async fn main() -> ExitCode {
     }
 
     let mut check_only = false;
+    let mut quiet = false;
+    let mut dry_run = false;
     let mut addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
     let mut path: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--check" => check_only = true,
+            "-q" | "--quiet" => quiet = true,
+            "--dry-run" => dry_run = true,
             "--addr" => {
                 i += 1;
                 let a = match args.get(i) {
@@ -66,6 +65,16 @@ async fn main() -> ExitCode {
             }
         }
         i += 1;
+    }
+
+    // Initialize tracing. In quiet mode, drop the subscriber to silence all
+    // request/error logs emitted via `tracing::*`. The default filter prefers
+    // RUST_LOG, falling back to "info,mii_http=debug" so the per-function
+    // call logs added across the codebase are visible by default.
+    if !quiet {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,mii_http=debug"));
+        tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
     let path = match path {
@@ -118,7 +127,7 @@ async fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
-    if let Err(e) = server::serve(spec, addr).await {
+    if let Err(e) = server::serve(spec, addr, dry_run).await {
         eprintln!("server error: {}", e);
         return ExitCode::from(1);
     }

@@ -123,6 +123,7 @@ fn render_text_parts(parts: &[TextPart], ctx: &ExecContext) -> (String, bool) {
 }
 
 pub fn build_argv(tokens: &[ExecToken], ctx: &ExecContext) -> Vec<String> {
+    tracing::debug!(tokens = tokens.len(), "exec::build_argv");
     let mut argv = Vec::new();
     for t in tokens {
         match t {
@@ -159,11 +160,41 @@ pub struct ExecOutput {
     pub stderr: Vec<u8>,
 }
 
+/// Render a human-readable, non-executing preview of `pipeline` against `ctx`.
+/// Used by `--dry-run` to log the commands that would have run.
+pub fn preview_pipeline(pipeline: &[ExecStage], ctx: &ExecContext) -> Vec<String> {
+    tracing::debug!(stages = pipeline.len(), "exec::preview_pipeline");
+    let mut out = Vec::with_capacity(pipeline.len());
+    for stage in pipeline {
+        match stage {
+            ExecStage::Source { reference, .. } => {
+                let resolved = ctx
+                    .resolve_text(reference)
+                    .map(|s| {
+                        if s.len() > 200 {
+                            format!("{}…", &s[..200])
+                        } else {
+                            s
+                        }
+                    })
+                    .unwrap_or_else(|| "<unresolved>".into());
+                out.push(format!("stdin <- {} = {:?}", reference.describe(), resolved));
+            }
+            ExecStage::Command { tokens, .. } => {
+                let argv = build_argv(tokens, ctx);
+                out.push(format!("argv: {:?}", argv));
+            }
+        }
+    }
+    out
+}
+
 pub async fn run_pipeline(
     pipeline: &[ExecStage],
     ctx: &ExecContext,
     timeout: Option<std::time::Duration>,
 ) -> Result<ExecOutput, String> {
+    tracing::debug!(stages = pipeline.len(), ?timeout, "exec::run_pipeline");
     if pipeline.is_empty() {
         return Err("empty exec pipeline".into());
     }
@@ -207,6 +238,7 @@ async fn run_pipeline_inner(
                 }
                 let program = argv[0].clone();
                 let args = &argv[1..];
+                tracing::debug!(program = %program, args = ?args, "exec::run_pipeline: spawning");
                 let mut cmd = Command::new(&program);
                 cmd.args(args);
                 cmd.stdout(Stdio::piped());
