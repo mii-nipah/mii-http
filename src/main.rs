@@ -1,4 +1,4 @@
-use mii_http::{check, diag, parser, server};
+use mii_http::{check, diag, parse, server};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -85,7 +85,7 @@ async fn main() -> ExitCode {
     };
     let file_name = path.to_string_lossy().to_string();
 
-    let parsed = parser::parse(&source);
+    let parsed = parse::parse(&source);
     diag::emit_all(&parsed.diags, &file_name, &source);
     let has_parse_errors = parsed
         .diags

@@ -1,7 +1,7 @@
 //! Parser acceptance/rejection tests.
 
 use mii_http::diag::DiagKind;
-use mii_http::parser::parse;
+use mii_http::parse::parse;
 use mii_http::spec::{
     AuthSpec, BodySpec, ExecStage, ExecToken, JsonFieldType, Method, PathSegment, TextPart,
     TypeExpr, ValueRef, ValueSource,

@@ -7,6 +7,9 @@
 //!
 //! Whole-line comments start with `#`. Trailing inline comments are not
 //! supported (to avoid ambiguity with regex/exec content).
+//!
+//! The Exec sub-language is parsed by [`crate::parse::exec`] (chumsky); this
+//! module only handles the line-oriented outer grammar.
 
 use crate::diag::Diag;
 use crate::spec::*;
@@ -271,7 +274,7 @@ impl<'a> Parser<'a> {
             let trim_off = rest.len() - rest.trim_start().len();
             let raw = rest.trim().to_string();
             let span = (exec_off + trim_off)..(exec_off + trim_off + raw.len());
-            let pipeline = match crate::exec::parse_exec(&raw, span.start) {
+            let pipeline = match crate::parse::exec::parse_exec(&raw, span.start) {
                 Ok(p) => p,
                 Err(d) => {
                     self.diags.push(d);

@@ -6,11 +6,11 @@ use mii_http::spec::{ExecStage, ExecToken, ValueRef};
 use std::collections::BTreeMap;
 
 fn parse(src: &str) -> Vec<ExecStage> {
-    mii_http::exec::parse_exec(src, 0).expect("expected exec to parse")
+    mii_http::parse::exec::parse_exec(src, 0).expect("expected exec to parse")
 }
 
 fn parse_err(src: &str) {
-    let r = mii_http::exec::parse_exec(src, 0);
+    let r = mii_http::parse::exec::parse_exec(src, 0);
     assert!(r.is_err(), "expected parse error for {:?}", src);
 }
 

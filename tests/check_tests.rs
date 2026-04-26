@@ -2,7 +2,7 @@
 
 use mii_http::check::check;
 use mii_http::diag::DiagKind;
-use mii_http::parser::parse;
+use mii_http::parse::parse;
 
 fn parse_or_panic(src: &str) -> mii_http::spec::Spec {
     let r = parse(src);
