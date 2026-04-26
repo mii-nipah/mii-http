@@ -29,6 +29,7 @@ Hello, world
 - [Quick start](#quick-start)
 - [The `.http` format](#the-http-format)
 - [CLI](#cli)
+- [Editor support](#editor-support)
 - [Architecture](#architecture)
 - [Security model](#security-model)
 - [Contributing](#contributing)
@@ -135,12 +136,31 @@ Exec: echo username=[$.username] age=[$.age]
 ```text
 mii-http <path>                       run the server
 mii-http --check <path>               validate the specs and exit
+mii-http --check --json <path>        validate and print JSON diagnostics
 mii-http --addr 0.0.0.0:8080 <path>   bind to a specific address
 mii-http -q | --quiet <path>          suppress request/error logs
 mii-http --dry-run <path>             log commands instead of running them
 ```
 
 `--dry-run` is the recommended way to develop a spec: every request prints the exact command line that *would* have been executed, with all interpolations resolved.
+
+`--check --json` emits the same validation result as machine-readable diagnostics for editor integrations.
+
+## Editor support
+
+A VS Code extension lives in [editors/vscode/mii-http](editors/vscode/mii-http). It adds syntax highlighting, `mii-http --check --json` diagnostics and basic completions for directives, types and `Exec` references.
+
+Build the binary and the extension before launching the extension host or packaging a VSIX:
+
+```sh
+cargo build
+cd editors/vscode/mii-http
+bun install
+bun run compile
+bun run package
+```
+
+The CI workflow publishes downloadable VSIX files through GitHub, not the VS Code Marketplace. When `editors/vscode/mii-http/package.json` gets a new version on `main`, `.github/workflows/vscode-extension.yml` creates a `vX.Y.Z-vscode` release tag and attaches `mii-http-X.Y.Z.vsix` to the GitHub Release. Every workflow run also uploads the VSIX as an Actions artifact.
 
 ## Architecture
 

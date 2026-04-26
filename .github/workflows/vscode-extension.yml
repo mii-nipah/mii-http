@@ -1,0 +1,102 @@
+name: VS Code Extension VSIX
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - editors/vscode/mii-http/**
+      - .github/workflows/vscode-extension.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package-vsix:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode/mii-http
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.18
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('editors/vscode/mii-http/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Read extension version
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION-vscode" >> "$GITHUB_OUTPUT"
+          echo "vsix=mii-http-$VERSION.vsix" >> "$GITHUB_OUTPUT"
+          echo "Detected VS Code extension version: $VERSION"
+
+      - name: Check if release tag already exists
+        id: tag_check
+        run: |
+          if git rev-parse "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.version.outputs.tag }} already exists; this run will only upload a workflow artifact."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Compile extension
+        run: bun run compile
+
+      - name: Package VSIX
+        env:
+          VSIX: ${{ steps.version.outputs.vsix }}
+        run: bun x vsce package --out "$VSIX"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.vsix }}
+          path: editors/vscode/mii-http/${{ steps.version.outputs.vsix }}
+          if-no-files-found: error
+
+      - name: Create and push release tag
+        if: steps.tag_check.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "VS Code extension $TAG"
+          git push origin "$TAG"
+
+      - name: Create GitHub release with VSIX
+        if: steps.tag_check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          VSIX: ${{ steps.version.outputs.vsix }}
+        run: |
+          PRERELEASE_FLAG=""
+          case "$VERSION" in
+            *-*) PRERELEASE_FLAG="--prerelease" ;;
+          esac
+          gh release create "$TAG" "$VSIX" \
+            --title "mii-http VS Code extension $VERSION" \
+            --notes "Download the VSIX asset and install it with: code --install-extension $VSIX" \
+            $PRERELEASE_FLAG

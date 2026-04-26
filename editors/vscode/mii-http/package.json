@@ -1,0 +1,84 @@
+{
+  "name": "mii-http",
+  "displayName": "mii-http",
+  "description": "Language support for mii-http .http spec files.",
+  "version": "0.1.0",
+  "publisher": "mii-nipah",
+  "license": "BSD-3-Clause",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mii-nipah/mii-http"
+  },
+  "packageManager": "bun@1.2.18",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "activationEvents": [
+    "onLanguage:mii-http"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "mii-http",
+        "aliases": [
+          "mii-http",
+          "Mii HTTP"
+        ],
+        "extensions": [
+          ".http"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "mii-http",
+        "scopeName": "source.mii-http",
+        "path": "./syntaxes/mii-http.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "mii-http",
+      "properties": {
+        "miiHttp.executable": {
+          "type": "string",
+          "default": "mii-http",
+          "description": "Path to the mii-http executable. When left as mii-http, the extension first tries target/debug/mii-http in the workspace."
+        },
+        "miiHttp.checkArgs": {
+          "type": "array",
+          "default": [
+            "--check",
+            "--json"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Arguments passed before the spec path when checking a document."
+        },
+        "miiHttp.checkOnChange": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run mii-http diagnostics after edits."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "package": "bun run compile && vsce package",
+    "watch": "tsc -watch -p ./",
+    "test": "bun run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "1.85.0",
+    "@vscode/vsce": "^3.9.1",
+    "typescript": "^5.3.3"
+  }
+}
