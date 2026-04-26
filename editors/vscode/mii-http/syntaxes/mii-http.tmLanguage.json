@@ -13,13 +13,16 @@
       "include": "#setup"
     },
     {
-      "include": "#directives"
+      "include": "#responseType"
     },
     {
-      "include": "#types"
+      "include": "#exec"
     },
     {
-      "include": "#execRefs"
+      "include": "#endpointFields"
+    },
+    {
+      "include": "#bodyFields"
     },
     {
       "include": "#strings"
@@ -37,9 +40,23 @@
     "endpoint": {
       "patterns": [
         {
-          "name": "keyword.other.method.mii-http",
-          "match": "^\\s*(GET|POST|PUT|DELETE|PATCH)\\b"
-        },
+          "begin": "^\\s*(GET|POST|PUT|DELETE|PATCH)\\b",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.other.method.mii-http"
+            }
+          },
+          "end": "$",
+          "patterns": [
+            {
+              "include": "#pathParams"
+            }
+          ]
+        }
+      ]
+    },
+    "pathParams": {
+      "patterns": [
         {
           "name": "variable.parameter.path.mii-http",
           "match": ":[A-Za-z_][A-Za-z0-9_-]*(?::[A-Za-z][A-Za-z0-9_()|./-]*)?"
@@ -50,32 +67,177 @@
       "patterns": [
         {
           "name": "keyword.control.setup.mii-http",
-          "match": "^\\s*(VERSION|BASE|AUTH|JWT_VERIFIER|TOKEN_SECRET|MAX_BODY_SIZE|MAX_QUERY_PARAM_SIZE|MAX_HEADER_SIZE|TIMEOUT)\\b"
+          "match": "^\\s*(VERSION|BASE|MAX_BODY_SIZE|MAX_QUERY_PARAM_SIZE|MAX_HEADER_SIZE|TIMEOUT)\\b"
         },
         {
-          "name": "storage.type.auth.mii-http",
-          "match": "\\b(Bearer|ENV|HEADER)\\b"
+          "begin": "^\\s*(AUTH)\\s+",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.setup.mii-http"
+            }
+          },
+          "end": "$",
+          "patterns": [
+            {
+              "name": "storage.type.auth.mii-http",
+              "match": "\\bBearer\\b"
+            },
+            {
+              "include": "#valueSources"
+            }
+          ]
+        },
+        {
+          "begin": "^\\s*(JWT_VERIFIER|TOKEN_SECRET)\\b",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.setup.mii-http"
+            }
+          },
+          "end": "$",
+          "patterns": [
+            {
+              "include": "#valueSources"
+            }
+          ]
         }
       ]
     },
-    "directives": {
+    "responseType": {
       "patterns": [
         {
-          "name": "keyword.control.directive.mii-http",
-          "match": "^\\s*(QUERY|HEADER|VAR|BODY)\\b"
+          "name": "meta.directive.response-type.mii-http",
+          "match": "^\\s*(Response-Type)(:?)(.*)$",
+          "captures": {
+            "1": {
+              "name": "keyword.control.directive.mii-http"
+            },
+            "2": {
+              "name": "punctuation.separator.key-value.mii-http"
+            },
+            "3": {
+              "name": "string.unquoted.media-type.mii-http"
+            }
+          }
+        }
+      ]
+    },
+    "exec": {
+      "patterns": [
+        {
+          "begin": "^\\s*(Exec)(:)",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.directive.mii-http"
+            },
+            "2": {
+              "name": "punctuation.separator.key-value.mii-http"
+            }
+          },
+          "end": "$",
+          "patterns": [
+            {
+              "include": "#execRefs"
+            },
+            {
+              "include": "#strings"
+            }
+          ]
+        }
+      ]
+    },
+    "endpointFields": {
+      "patterns": [
+        {
+          "begin": "^\\s*(QUERY|HEADER)\\s+([A-Za-z_][A-Za-z0-9_-]*)(\\?)?\\s*(:)",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.directive.mii-http"
+            },
+            "2": {
+              "name": "variable.parameter.field.mii-http"
+            },
+            "3": {
+              "name": "keyword.operator.optional.mii-http"
+            },
+            "4": {
+              "name": "punctuation.separator.key-value.mii-http"
+            }
+          },
+          "end": "$",
+          "patterns": [
+            {
+              "include": "#types"
+            }
+          ]
         },
         {
-          "name": "keyword.control.directive.mii-http",
-          "match": "^\\s*(Response-Type|Exec):?"
+          "begin": "^\\s*(VAR)\\s+([A-Za-z_][A-Za-z0-9_-]*)\\b",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.directive.mii-http"
+            },
+            "2": {
+              "name": "variable.other.var.mii-http"
+            }
+          },
+          "end": "$",
+          "patterns": [
+            {
+              "include": "#valueSources"
+            }
+          ]
+        },
+        {
+          "begin": "^\\s*(BODY)\\s+",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.directive.mii-http"
+            }
+          },
+          "end": "$",
+          "patterns": [
+            {
+              "include": "#bodyTypes"
+            }
+          ]
+        }
+      ]
+    },
+    "bodyFields": {
+      "patterns": [
+        {
+          "begin": "^\\s*([A-Za-z_][A-Za-z0-9_-]*)(\\?)?\\s*(:)",
+          "beginCaptures": {
+            "1": {
+              "name": "variable.other.field.mii-http"
+            },
+            "2": {
+              "name": "keyword.operator.optional.mii-http"
+            },
+            "3": {
+              "name": "punctuation.separator.key-value.mii-http"
+            }
+          },
+          "end": "$",
+          "patterns": [
+            {
+              "include": "#types"
+            }
+          ]
+        }
+      ]
+    },
+    "bodyTypes": {
+      "patterns": [
+        {
+          "name": "storage.type.body.mii-http",
+          "match": "\\b(json|form|string|binary)\\b"
         }
       ]
     },
     "types": {
       "patterns": [
-        {
-          "name": "storage.type.primitive.mii-http",
-          "match": "\\b(int|float|boolean|bool|uuid|string|json|binary|form)\\b"
-        },
         {
           "name": "constant.numeric.range.mii-http",
           "match": "\\b(?:int|float)\\([^)]*\\)"
@@ -83,6 +245,30 @@
         {
           "name": "string.regexp.mii-http",
           "match": "/(?:\\\\.|[^/\\\\])*/"
+        },
+        {
+          "name": "storage.type.primitive.mii-http",
+          "match": "\\b(int|float|boolean|bool|uuid|string|json|binary)\\b"
+        },
+        {
+          "name": "constant.language.union.mii-http",
+          "match": "\\b[A-Za-z0-9_-]+(?:\\|[A-Za-z0-9_-]+)+\\b"
+        }
+      ]
+    },
+    "valueSources": {
+      "patterns": [
+        {
+          "name": "meta.value-source.mii-http",
+          "match": "\\[(ENV|HEADER)\\s+([^\\]]+)\\]",
+          "captures": {
+            "1": {
+              "name": "storage.type.source.mii-http"
+            },
+            "2": {
+              "name": "variable.other.source-name.mii-http"
+            }
+          }
         }
       ]
     },
