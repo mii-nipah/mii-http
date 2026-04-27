@@ -8,7 +8,7 @@ repository = "https://github.com/mii-nipah/mii-http"
 
 [dependencies]
 bytes = "1"
-mii-http-client-macros = { path = "../mii-http-client-macros" }
+mii-http-client-macros = { version = "0.1", path = "../mii-http-client-macros" }
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }

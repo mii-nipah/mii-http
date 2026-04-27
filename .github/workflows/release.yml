@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: rust-crates-release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -23,58 +27,138 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
 
-      - name: Read version from Cargo.toml
-        id: version
+      - name: Read crate versions
+        id: versions
         run: |
-          VERSION=$(cargo metadata --no-deps --format-version 1 \
-            | python3 -c "import json,sys; pkgs=json.load(sys.stdin)['packages']; p=[x for x in pkgs if x['name']=='mii-http'][0]; print(p['version'])")
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Detected version: $VERSION"
+          set -euo pipefail
+          cargo metadata --no-deps --format-version 1 > "$RUNNER_TEMP/cargo-metadata.json"
+          python3 <<'PY' >> "$GITHUB_ENV"
+          import json
+          import os
 
-      - name: Check if tag already exists
-        id: tag_check
+          with open(os.environ["RUNNER_TEMP"] + "/cargo-metadata.json", encoding="utf-8") as file:
+              packages = {package["name"]: package["version"] for package in json.load(file)["packages"]}
+
+          required = ["mii-http", "mii-http-client-macros", "mii-http-client"]
+          missing = [name for name in required if name not in packages]
+          if missing:
+              raise SystemExit(f"missing packages in cargo metadata: {', '.join(missing)}")
+
+          print(f"MII_HTTP_VERSION={packages['mii-http']}")
+          print(f"MII_HTTP_TAG=v{packages['mii-http']}")
+          print(f"MII_HTTP_CLIENT_MACROS_VERSION={packages['mii-http-client-macros']}")
+          print(f"MII_HTTP_CLIENT_MACROS_TAG=mii-http-client-macros-v{packages['mii-http-client-macros']}")
+          print(f"MII_HTTP_CLIENT_VERSION={packages['mii-http-client']}")
+          print(f"MII_HTTP_CLIENT_TAG=mii-http-client-v{packages['mii-http-client']}")
+          PY
+
+      - name: Check release tags
+        id: release_plan
         run: |
-          if git rev-parse "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Tag ${{ steps.version.outputs.tag }} already exists; skipping release."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          NEEDS_RELEASE=false
+
+          check_tag() {
+            local crate="$1"
+            local tag="$2"
+            if git rev-parse "refs/tags/$tag" >/dev/null 2>&1; then
+              echo "$crate: $tag already exists; skipping."
+            else
+              echo "$crate: $tag is missing; release needed."
+              NEEDS_RELEASE=true
+            fi
+          }
+
+          check_tag "mii-http" "$MII_HTTP_TAG"
+          check_tag "mii-http-client-macros" "$MII_HTTP_CLIENT_MACROS_TAG"
+          check_tag "mii-http-client" "$MII_HTTP_CLIENT_TAG"
+
+          echo "needs_release=$NEEDS_RELEASE" >> "$GITHUB_OUTPUT"
 
       - name: Build
-        if: steps.tag_check.outputs.exists == 'false'
-        run: cargo build --release --locked
+        if: steps.release_plan.outputs.needs_release == 'true'
+        run: cargo build --workspace --release --locked
 
       - name: Test
-        if: steps.tag_check.outputs.exists == 'false'
-        run: cargo test --release --locked
+        if: steps.release_plan.outputs.needs_release == 'true'
+        run: cargo test --workspace --release --locked
 
-      - name: Publish to crates.io
-        if: steps.tag_check.outputs.exists == 'false'
+      - name: Publish crates.io packages
+        if: steps.release_plan.outputs.needs_release == 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked
-
-      - name: Create and push git tag
-        if: steps.tag_check.outputs.exists == 'false'
-        env:
-          TAG: ${{ steps.version.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" -m "Release $TAG"
-          git push origin "$TAG"
 
-      - name: Create GitHub Release
-        if: steps.tag_check.outputs.exists == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.version.outputs.tag }}
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          PRERELEASE_FLAG=""
-          case "$VERSION" in
-            *-*) PRERELEASE_FLAG="--prerelease" ;;
-          esac
-          gh release create "$TAG" --generate-notes $PRERELEASE_FLAG
+          crate_is_published() {
+            local crate="$1"
+            local version="$2"
+            curl --silent --fail \
+              --header "User-Agent: mii-http release workflow" \
+              "https://crates.io/api/v1/crates/$crate/$version" >/dev/null
+          }
+
+          wait_for_crate() {
+            local crate="$1"
+            local version="$2"
+            for _ in {1..30}; do
+              if crate_is_published "$crate" "$version"; then
+                return 0
+              fi
+              sleep 10
+            done
+
+            echo "Timed out waiting for $crate $version to appear in crates.io." >&2
+            return 1
+          }
+
+          create_release_tag() {
+            local tag="$1"
+            local title="$2"
+            local version="$3"
+            local prerelease_flag=()
+
+            case "$version" in
+              *-*) prerelease_flag=(--prerelease) ;;
+            esac
+
+            git tag -a "$tag" -m "$title"
+            git push origin "$tag"
+            gh release create "$tag" \
+              --title "$title" \
+              --generate-notes \
+              "${prerelease_flag[@]}"
+          }
+
+          publish_crate() {
+            local crate="$1"
+            local version="$2"
+            local tag="$3"
+            local title="$4"
+
+            if git rev-parse "refs/tags/$tag" >/dev/null 2>&1; then
+              echo "$crate: $tag already exists; skipping."
+              return 0
+            fi
+
+            if crate_is_published "$crate" "$version"; then
+              echo "$crate $version is already on crates.io; creating the missing release tag."
+            else
+              cargo publish -p "$crate" --locked
+              wait_for_crate "$crate" "$version"
+            fi
+
+            create_release_tag "$tag" "$title" "$version"
+          }
+
+          publish_crate "mii-http" "$MII_HTTP_VERSION" "$MII_HTTP_TAG" "mii-http $MII_HTTP_VERSION"
+          wait_for_crate "mii-http" "$MII_HTTP_VERSION"
+
+          publish_crate "mii-http-client-macros" "$MII_HTTP_CLIENT_MACROS_VERSION" "$MII_HTTP_CLIENT_MACROS_TAG" "mii-http-client-macros $MII_HTTP_CLIENT_MACROS_VERSION"
+          wait_for_crate "mii-http-client-macros" "$MII_HTTP_CLIENT_MACROS_VERSION"
+
+          publish_crate "mii-http-client" "$MII_HTTP_CLIENT_VERSION" "$MII_HTTP_CLIENT_TAG" "mii-http-client $MII_HTTP_CLIENT_VERSION"

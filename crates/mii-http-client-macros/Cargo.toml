@@ -10,7 +10,7 @@ repository = "https://github.com/mii-nipah/mii-http"
 proc-macro = true
 
 [dependencies]
-mii-http = { path = "../.." }
+mii-http = { version = "0.4", path = "../.." }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
