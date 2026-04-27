@@ -29,6 +29,7 @@ Hello, world
 - [Quick start](#quick-start)
 - [The `.http` format](#the-http-format)
 - [CLI](#cli)
+- [Rust client generation](#rust-client-generation)
 - [Editor support](#editor-support)
 - [Architecture](#architecture)
 - [Security model](#security-model)
@@ -172,6 +173,38 @@ mii-http --dry-run <path>             log commands instead of running them
 `--dry-run` is the recommended way to develop a spec: every request prints the exact command line that *would* have been executed, with all interpolations resolved.
 
 `--check --json` emits the same validation result as machine-readable diagnostics for editor integrations.
+
+## Rust client generation
+
+The `mii-http-client` crate can generate a small async Rust client from a checked `.http` spec. The macro reads and validates the spec at compile time, then only generates the endpoints you explicitly map:
+
+```rust
+mii_http_client::client! {
+    pub struct NamedApi;
+    spec = "examples/sample.http";
+
+    GET /status as status => String;
+    GET /greet as greet => String;
+    POST /submit-json as submit_json => serde_json::Value;
+    GET /headers as headers => mii_http_client::ByteStream;
+}
+```
+
+The explicit `METHOD /path as method => ReturnType;` form avoids path-name collisions and keeps response decoding in the Rust caller's hands. `String` responses are read as text, `mii_http_client::Bytes` and `Vec<u8>` as bytes, `mii_http_client::ByteStream` for `Response-Type stream ...`, and other return types are decoded as JSON.
+
+Generated form bodies use normal URL-encoded forms until a `binary` field appears. Binary form fields use `mii_http_client::FilePart`, which can be path-backed for streaming uploads or bytes-backed for generated/in-memory content:
+
+```rust
+UploadBody {
+    title: "cover".into(),
+    file: mii_http_client::FilePart::path("cover.png"),
+    preview: Some(
+        mii_http_client::FilePart::bytes(vec![1, 2, 3])
+            .with_file_name("preview.bin")
+            .with_mime("application/octet-stream"),
+    ),
+}
+```
 
 ## Editor support
 

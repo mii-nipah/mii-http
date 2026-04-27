@@ -1,0 +1,16 @@
+[package]
+name = "mii-http-client-macros"
+version = "0.1.0"
+edition = "2024"
+description = "Proc macros for generated mii-http Rust clients."
+license = "BSD-3-Clause"
+repository = "https://github.com/mii-nipah/mii-http"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+mii-http = { path = "../.." }
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

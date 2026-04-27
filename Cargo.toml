@@ -7,6 +7,14 @@ license = "BSD-3-Clause"
 repository = "https://github.com/mii-nipah/mii-http"
 readme = "README.md"
 
+[workspace]
+members = [
+    ".",
+    "crates/mii-http-client",
+    "crates/mii-http-client-macros",
+]
+resolver = "3"
+
 [dependencies]
 ariadne = "0.6"
 chumsky = "0.12"

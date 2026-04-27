@@ -1,0 +1,8 @@
+POST /upload
+Response-Type text/plain
+BODY form {
+  title: /[a-zA-Z0-9_]+/
+  file: binary
+  preview?: binary
+}
+Exec: echo [$.title] [$.file] [$.preview]
