@@ -15,10 +15,12 @@
 //!   group is omitted.
 //! - Request values interpolated into shell text are single-quoted. Literal
 //!   shell syntax written by the spec author remains literal shell syntax.
-//! - A binary body used outside stdin is written to a temp file and the path is
-//!   interpolated as a quoted shell word.
+//! - A binary body or binary form field used outside stdin is written to a
+//!   temp file and the path is interpolated as a quoted shell word.
 //! - Pipeline stages are wired stdin → stdout. A bare `Source` stage
-//!   (`$ | cmd`) feeds a value as stdin to the next command.
+//!   (`$ | cmd`) feeds a value as stdin to the next command. Multiple
+//!   statements (multi-line Exec) are joined into a single shell script
+//!   separated by newlines.
 
 use crate::spec::{ExecStage, ExecToken, TextPart, ValueRef};
 use bytes::Bytes;
@@ -31,13 +33,35 @@ use tokio::process::Command;
 
 // ---------- Context ----------
 
+#[derive(Clone, Debug)]
+pub enum FormFieldValue {
+    Text(String),
+    Binary(Bytes),
+}
+
+impl FormFieldValue {
+    pub fn as_text(&self) -> Option<&str> {
+        if let FormFieldValue::Text(s) = self {
+            Some(s)
+        } else {
+            None
+        }
+    }
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            FormFieldValue::Text(s) => s.as_bytes(),
+            FormFieldValue::Binary(b) => b.as_ref(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub enum BodyValue {
     #[default]
     None,
     Text(String),
     Json(serde_json::Value),
-    Form(BTreeMap<String, String>),
+    Form(BTreeMap<String, FormFieldValue>),
     Binary(Bytes),
 }
 
@@ -72,7 +96,7 @@ impl ExecContext {
                     if path.is_empty() {
                         Some(form_to_text(m))
                     } else if path.len() == 1 {
-                        m.get(&path[0]).cloned()
+                        m.get(&path[0]).and_then(|v| v.as_text().map(str::to_string))
                     } else {
                         None
                     }
@@ -83,11 +107,17 @@ impl ExecContext {
     }
 
     fn resolve_bytes(&self, r: &ValueRef) -> Option<Vec<u8>> {
-        if let ValueRef::Body { path } = r
-            && path.is_empty()
-            && let BodyValue::Binary(b) = &self.body
-        {
-            return Some(b.to_vec());
+        if let ValueRef::Body { path } = r {
+            if path.is_empty() {
+                if let BodyValue::Binary(b) = &self.body {
+                    return Some(b.to_vec());
+                }
+            } else if path.len() == 1
+                && let BodyValue::Form(m) = &self.body
+                && let Some(field) = m.get(&path[0])
+            {
+                return Some(field.as_bytes().to_vec());
+            }
         }
         self.resolve_text(r).map(|s| s.into_bytes())
     }
@@ -100,8 +130,14 @@ fn json_to_text(v: &serde_json::Value) -> String {
     }
 }
 
-fn form_to_text(m: &BTreeMap<String, String>) -> String {
-    let pairs: Vec<String> = m.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+fn form_to_text(m: &BTreeMap<String, FormFieldValue>) -> String {
+    let pairs: Vec<String> = m
+        .iter()
+        .filter_map(|(k, v)| match v {
+            FormFieldValue::Text(s) => Some(format!("{}={}", k, s)),
+            FormFieldValue::Binary(_) => None,
+        })
+        .collect();
     pairs.join("&")
 }
 
@@ -160,26 +196,26 @@ pub struct ExecOutput {
     pub stderr: Vec<u8>,
 }
 
-/// Render a human-readable, non-executing preview of `pipeline` against `ctx`.
-/// Used by `--dry-run` to log the commands that would have run.
-pub fn preview_pipeline(pipeline: &[ExecStage], ctx: &ExecContext) -> Vec<String> {
-    tracing::debug!(stages = pipeline.len(), "exec::preview_pipeline");
-    match render_shell_with_mode(pipeline, ctx, false) {
+/// Render a human-readable, non-executing preview of `statements` against
+/// `ctx`. Used by `--dry-run` to log the commands that would have run.
+pub fn preview_pipeline(statements: &[Vec<ExecStage>], ctx: &ExecContext) -> Vec<String> {
+    tracing::debug!(statements = statements.len(), "exec::preview_pipeline");
+    match render_shell_with_mode(statements, ctx, false) {
         Ok(rendered) => vec![format!("shell: {}", rendered.script)],
         Err(err) => vec![format!("shell: <unresolved: {}>", err)],
     }
 }
 
 pub async fn run_pipeline(
-    pipeline: &[ExecStage],
+    statements: &[Vec<ExecStage>],
     ctx: &ExecContext,
     timeout: Option<std::time::Duration>,
 ) -> Result<ExecOutput, String> {
-    tracing::debug!(stages = pipeline.len(), ?timeout, "exec::run_pipeline");
-    if pipeline.is_empty() {
+    tracing::debug!(statements = statements.len(), ?timeout, "exec::run_pipeline");
+    if statements.is_empty() {
         return Err("empty exec pipeline".into());
     }
-    let rendered = render_shell(pipeline, ctx)?;
+    let rendered = render_shell(statements, ctx)?;
     run_shell(rendered, timeout).await
 }
 
@@ -205,20 +241,34 @@ impl<'a> ShellRenderer<'a> {
     }
 
     fn resolve_shell_text(&mut self, r: &ValueRef) -> Result<Option<String>, String> {
-        if let ValueRef::Body { path } = r
-            && path.is_empty()
-            && let BodyValue::Binary(bytes) = &self.ctx.body
-        {
-            if !self.materialize_binary {
-                return Ok(Some("<binary temp file>".into()));
+        if let ValueRef::Body { path } = r {
+            if path.is_empty()
+                && let BodyValue::Binary(bytes) = &self.ctx.body
+            {
+                if !self.materialize_binary {
+                    return Ok(Some("<binary temp file>".into()));
+                }
+                return Ok(Some(self.materialize_to_temp(bytes)?));
             }
-            let mut file = NamedTempFile::new().map_err(|e| e.to_string())?;
-            file.write_all(bytes).map_err(|e| e.to_string())?;
-            let path = file.path().to_string_lossy().to_string();
-            self.temp_files.push(file);
-            return Ok(Some(path));
+            if path.len() == 1
+                && let BodyValue::Form(m) = &self.ctx.body
+                && let Some(FormFieldValue::Binary(bytes)) = m.get(&path[0])
+            {
+                if !self.materialize_binary {
+                    return Ok(Some("<binary temp file>".into()));
+                }
+                return Ok(Some(self.materialize_to_temp(bytes)?));
+            }
         }
         Ok(self.ctx.resolve_text(r))
+    }
+
+    fn materialize_to_temp(&mut self, bytes: &[u8]) -> Result<String, String> {
+        let mut file = NamedTempFile::new().map_err(|e| e.to_string())?;
+        file.write_all(bytes).map_err(|e| e.to_string())?;
+        let path = file.path().to_string_lossy().to_string();
+        self.temp_files.push(file);
+        Ok(path)
     }
 
     fn render_command(&mut self, tokens: &[ExecToken]) -> Result<String, String> {
@@ -301,45 +351,63 @@ impl<'a> ShellRenderer<'a> {
     }
 }
 
-fn render_shell(pipeline: &[ExecStage], ctx: &ExecContext) -> Result<RenderedShell, String> {
-    render_shell_with_mode(pipeline, ctx, true)
+fn render_shell(statements: &[Vec<ExecStage>], ctx: &ExecContext) -> Result<RenderedShell, String> {
+    render_shell_with_mode(statements, ctx, true)
 }
 
 fn render_shell_with_mode(
-    pipeline: &[ExecStage],
+    statements: &[Vec<ExecStage>],
     ctx: &ExecContext,
     materialize_binary: bool,
 ) -> Result<RenderedShell, String> {
-    let mut pending_stdin: Option<Vec<u8>> = None;
-    let mut commands = Vec::new();
-    let mut saw_command = false;
     let mut renderer = ShellRenderer::new(ctx, materialize_binary);
-
-    for stage in pipeline {
-        match stage {
-            ExecStage::Source { reference, .. } => {
-                if saw_command {
-                    return Err(
-                        "value-reference source after a command stage is not supported".into(),
-                    );
+    let mut script_lines = Vec::new();
+    let mut script_stdin: Option<Vec<u8>> = None;
+    for (idx, pipeline) in statements.iter().enumerate() {
+        let mut pending_stdin: Option<Vec<u8>> = None;
+        let mut commands = Vec::new();
+        let mut saw_command = false;
+        for stage in pipeline {
+            match stage {
+                ExecStage::Source { reference, .. } => {
+                    if saw_command {
+                        return Err(
+                            "value-reference source after a command stage is not supported".into(),
+                        );
+                    }
+                    let bytes = ctx
+                        .resolve_bytes(reference)
+                        .ok_or_else(|| format!("unresolved {}", reference.describe()))?;
+                    pending_stdin = Some(bytes);
                 }
-                let bytes = ctx
-                    .resolve_bytes(reference)
-                    .ok_or_else(|| format!("unresolved {}", reference.describe()))?;
-                pending_stdin = Some(bytes);
-            }
-            ExecStage::Command { tokens, .. } => {
-                saw_command = true;
-                commands.push(renderer.render_command(tokens)?);
+                ExecStage::Command { tokens, .. } => {
+                    saw_command = true;
+                    commands.push(renderer.render_command(tokens)?);
+                }
             }
         }
+        if commands.is_empty() {
+            return Err("pipeline ended without a command".to_string());
+        }
+        if pending_stdin.is_some() {
+            // Only the first statement may consume request stdin; subsequent
+            // statements would compete for the same stdin pipe.
+            if idx != 0 {
+                return Err(
+                    "only the first statement of a multi-line Exec may consume request stdin"
+                        .into(),
+                );
+            }
+            script_stdin = pending_stdin;
+        }
+        script_lines.push(commands.join(" | "));
     }
-    if commands.is_empty() {
+    if script_lines.is_empty() {
         return Err("pipeline ended without a command".to_string());
     }
     Ok(RenderedShell {
-        script: commands.join(" | "),
-        stdin: pending_stdin,
+        script: script_lines.join("\n"),
+        stdin: script_stdin,
         _temp_files: renderer.temp_files,
     })
 }
@@ -416,6 +484,137 @@ async fn run_shell(
         status: status.code().unwrap_or(-1),
         stdout,
         stderr,
+    })
+}
+
+/// A handle to a streaming exec: the receiver yields stdout chunks as they
+/// are produced; the join handle resolves with the final exit status (and any\n/// captured stderr) once the process completes.
+pub struct StreamingExec {
+    pub stdout_rx: tokio::sync::mpsc::Receiver<Result<Bytes, String>>,
+    pub completion: tokio::task::JoinHandle<Result<ExecCompletion, String>>,
+}
+
+#[derive(Debug)]
+pub struct ExecCompletion {
+    pub status: i32,
+    pub stderr: Vec<u8>,
+}
+
+pub async fn run_pipeline_streaming(
+    statements: &[Vec<ExecStage>],
+    ctx: &ExecContext,
+    timeout: Option<std::time::Duration>,
+) -> Result<StreamingExec, String> {
+    tracing::debug!(statements = statements.len(), ?timeout, "exec::run_pipeline_streaming");
+    if statements.is_empty() {
+        return Err("empty exec pipeline".into());
+    }
+    let rendered = render_shell(statements, ctx)?;
+    spawn_streaming(rendered, timeout).await
+}
+
+async fn spawn_streaming(
+    rendered: RenderedShell,
+    timeout: Option<std::time::Duration>,
+) -> Result<StreamingExec, String> {
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg("-c").arg(&rendered.script);
+    cmd.kill_on_drop(true);
+    cmd.process_group(0);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    if rendered.stdin.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn shell: {}", e))?;
+    let child_id = child.id();
+    if let Some(stdin) = rendered.stdin.clone()
+        && let Some(mut sin) = child.stdin.take()
+    {
+        // Push stdin in the background; large bodies must not block the
+        // caller before the response head can be sent.
+        tokio::spawn(async move {
+            let _ = sin.write_all(&stdin).await;
+        });
+    }
+
+    let temp_files = rendered._temp_files;
+    let mut stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, String>>(8);
+
+    let stderr_handle = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut s) = stderr {
+            tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf)
+                .await
+                .ok();
+        }
+        buf
+    });
+
+    let stdout_tx = tx.clone();
+    let stdout_pump = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        if let Some(s) = stdout.as_mut() {
+            let mut buf = vec![0u8; 8 * 1024];
+            loop {
+                match s.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if stdout_tx
+                            .send(Ok(Bytes::copy_from_slice(&buf[..n])))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = stdout_tx.send(Err(e.to_string())).await;
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let completion = tokio::spawn(async move {
+        let _temp_files = temp_files; // hold temp files alive until done
+        let status = if let Some(timeout) = timeout {
+            tokio::select! {
+                status = child.wait() => status.map_err(|e| e.to_string())?,
+                _ = tokio::time::sleep(timeout) => {
+                    if let Some(pid) = child_id {
+                        kill_process_group(pid);
+                    }
+                    let _ = child.kill().await;
+                    let _ = stdout_pump.await;
+                    return Err("execution timed out".into());
+                }
+            }
+        } else {
+            child.wait().await.map_err(|e| e.to_string())?
+        };
+        let _ = stdout_pump.await;
+        let stderr = stderr_handle.await.unwrap_or_default();
+        if let Some(pid) = child_id {
+            kill_process_group(pid);
+        }
+        Ok(ExecCompletion {
+            status: status.code().unwrap_or(-1),
+            stderr,
+        })
+    });
+
+    Ok(StreamingExec {
+        stdout_rx: rx,
+        completion,
     })
 }
 

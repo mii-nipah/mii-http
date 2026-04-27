@@ -1,18 +1,20 @@
 //! HTTP server runtime built on top of axum.
 
-use crate::exec::{self, BodyValue, ExecContext, ExecOutput};
+use crate::exec::{self, BodyValue, ExecContext, ExecOutput, FormFieldValue};
 use crate::spec::*;
 use crate::value::{self, ValidationError};
 use axum::{
     Router,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path as AxPath, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{MethodFilter, MethodRouter},
 };
+use futures_util::stream::{Stream, StreamExt};
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -180,13 +182,13 @@ async fn handle_inner(
         headers: validate_headers(setup, ep, &headers)?,
         path: validate_path(ep, &path)?,
         vars: resolve_vars(setup, ep, &headers)?,
-        body: build_body(ep, body)?,
+        body: build_body(ep, &headers, body)?,
     };
 
     let timeout = setup.timeout_ms.map(Duration::from_millis);
 
     if state.dry_run {
-        let preview = exec::preview_pipeline(&ep.exec.pipeline, &ctx);
+        let preview = exec::preview_pipeline(&ep.exec.statements, &ctx);
         tracing::info!(
             method = ep.method.as_str(),
             path = %ep.path,
@@ -207,11 +209,21 @@ async fn handle_inner(
         return Ok(resp);
     }
 
+    let content_type = ep
+        .response_type
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "text/plain; charset=utf-8".into());
+
+    if ep.response_stream {
+        return run_streaming(ep, ctx, timeout, content_type).await;
+    }
+
     let ExecOutput {
         status,
         stdout,
         stderr,
-    } = exec::run_pipeline(&ep.exec.pipeline, &ctx, timeout)
+    } = exec::run_pipeline(&ep.exec.statements, &ctx, timeout)
         .await
         .map_err(|e| HandlerError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
@@ -229,10 +241,6 @@ async fn handle_inner(
         ));
     }
 
-    let content_type = ep
-        .response_type
-        .clone()
-        .unwrap_or_else(|| "text/plain; charset=utf-8".into());
     let mut resp = Response::new(stdout.into());
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -241,6 +249,54 @@ async fn handle_inner(
             .unwrap_or_else(|_| header::HeaderValue::from_static("text/plain; charset=utf-8")),
     );
     Ok(resp)
+}
+
+async fn run_streaming(
+    ep: &Endpoint,
+    ctx: ExecContext,
+    timeout: Option<Duration>,
+    content_type: String,
+) -> Result<Response, HandlerError> {
+    let streaming = exec::run_pipeline_streaming(&ep.exec.statements, &ctx, timeout)
+        .await
+        .map_err(|e| HandlerError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let exec::StreamingExec {
+        stdout_rx,
+        completion,
+    } = streaming;
+    let method_str = ep.method.as_str().to_string();
+    let path_str = ep.path.clone();
+    tokio::spawn(async move {
+        match completion.await {
+            Ok(Ok(c)) if c.status != 0 => tracing::warn!(
+                method = %method_str,
+                path = %path_str,
+                status = c.status,
+                stderr = %String::from_utf8_lossy(&c.stderr),
+                "streaming exec returned non-zero"
+            ),
+            Ok(Err(e)) => tracing::warn!(method = %method_str, path = %path_str, error = %e, "streaming exec failed"),
+            _ => {}
+        }
+    });
+    let stream = chunk_stream(stdout_rx);
+    let body = Body::from_stream(stream);
+    let mut resp = Response::new(body);
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        content_type
+            .parse()
+            .unwrap_or_else(|_| header::HeaderValue::from_static("text/plain; charset=utf-8")),
+    );
+    Ok(resp)
+}
+
+fn chunk_stream(
+    rx: tokio::sync::mpsc::Receiver<Result<Bytes, String>>,
+) -> Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> {
+    let s = tokio_stream::wrappers::ReceiverStream::new(rx)
+        .map(|res| res.map_err(std::io::Error::other));
+    Box::pin(s)
 }
 
 fn check_validation(r: Result<(), ValidationError>, scope: &str) -> Result<(), HandlerError> {
@@ -385,7 +441,7 @@ fn resolve_vars(
     Ok(out)
 }
 
-fn build_body(ep: &Endpoint, body: Bytes) -> Result<BodyValue, HandlerError> {
+fn build_body(ep: &Endpoint, headers: &HeaderMap, body: Bytes) -> Result<BodyValue, HandlerError> {
     tracing::debug!(endpoint = %ep.path, body_len = body.len(), "server::build_body");
     Ok(match &ep.body {
         None => BodyValue::None,
@@ -405,13 +461,16 @@ fn build_body(ep: &Endpoint, body: Bytes) -> Result<BodyValue, HandlerError> {
             BodyValue::Json(v)
         }
         Some(BodySpec::Form { fields, .. }) => {
-            let parsed: BTreeMap<String, String> =
-                form_urlencoded::parse(&body).into_owned().collect();
+            let parsed = parse_form_body(headers, &body, fields)?;
             for f in fields {
-                let v = require_or_optional(parsed.get(&f.name), f.optional, || {
-                    format!("missing form field `{}`", f.name)
-                })?;
-                if let Some(v) = v {
+                let present = parsed.get(&f.name);
+                if present.is_none() && !f.optional {
+                    return Err(HandlerError::new(
+                        StatusCode::BAD_REQUEST,
+                        format!("missing form field `{}`", f.name),
+                    ));
+                }
+                if let Some(FormFieldValue::Text(v)) = present {
                     check_validation(
                         value::validate_text(v, &f.ty),
                         &format!("form field `{}`", f.name),
@@ -421,6 +480,163 @@ fn build_body(ep: &Endpoint, body: Bytes) -> Result<BodyValue, HandlerError> {
             BodyValue::Form(parsed)
         }
     })
+}
+
+fn parse_form_body(
+    headers: &HeaderMap,
+    body: &Bytes,
+    fields: &[NamedField],
+) -> Result<BTreeMap<String, FormFieldValue>, HandlerError> {
+    let ct = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if let Some(boundary) = multipart_boundary(ct) {
+        return parse_multipart(body, &boundary, fields);
+    }
+    let parsed: BTreeMap<String, FormFieldValue> = form_urlencoded::parse(body)
+        .into_owned()
+        .map(|(k, v)| (k, FormFieldValue::Text(v)))
+        .collect();
+    // url-encoded bodies cannot carry binary safely.
+    for f in fields {
+        if matches!(f.ty, TypeExpr::Binary) && parsed.contains_key(&f.name) {
+            return Err(HandlerError::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                format!(
+                    "form field `{}` is binary; use multipart/form-data",
+                    f.name
+                ),
+            ));
+        }
+    }
+    Ok(parsed)
+}
+
+fn multipart_boundary(content_type: &str) -> Option<String> {
+    let lower = content_type.to_ascii_lowercase();
+    if !lower.starts_with("multipart/form-data") {
+        return None;
+    }
+    for part in content_type.split(';').skip(1) {
+        let part = part.trim();
+        if let Some(rest) = part.strip_prefix("boundary=") {
+            let b = rest.trim().trim_matches('"');
+            if !b.is_empty() {
+                return Some(b.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_multipart(
+    body: &Bytes,
+    boundary: &str,
+    fields: &[NamedField],
+) -> Result<BTreeMap<String, FormFieldValue>, HandlerError> {
+    let binary_fields: std::collections::HashSet<&str> = fields
+        .iter()
+        .filter(|f| matches!(f.ty, TypeExpr::Binary))
+        .map(|f| f.name.as_str())
+        .collect();
+    let mut out: BTreeMap<String, FormFieldValue> = BTreeMap::new();
+    for part in split_multipart(body, boundary) {
+        let MultipartPart { name, data } = match part {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(HandlerError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid multipart body: {}", e),
+                ));
+            }
+        };
+        let Some(name) = name else { continue };
+        if binary_fields.contains(name.as_str()) {
+            out.insert(name, FormFieldValue::Binary(Bytes::copy_from_slice(&data)));
+        } else {
+            let text = String::from_utf8(data).map_err(|_| {
+                HandlerError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!("form field `{}` is not valid UTF-8", name),
+                )
+            })?;
+            out.insert(name, FormFieldValue::Text(text));
+        }
+    }
+    Ok(out)
+}
+
+struct MultipartPart {
+    name: Option<String>,
+    data: Vec<u8>,
+}
+
+/// Minimal multipart/form-data splitter sufficient for typical browser-style
+/// uploads. Returns one entry per part, preserving raw bytes for binary
+/// fields. Errors are surfaced as a string for diagnostics.
+fn split_multipart(body: &[u8], boundary: &str) -> Vec<Result<MultipartPart, String>> {
+    let delim = format!("--{}", boundary);
+    let body_str_lossy = String::from_utf8_lossy(body); // only used to find indices
+    let _ = body_str_lossy; // not needed; do byte search instead
+    let mut parts = Vec::new();
+    let bytes = body;
+    let delim_bytes = delim.as_bytes();
+    // find all delimiter positions
+    let mut positions = Vec::new();
+    let mut i = 0;
+    while i + delim_bytes.len() <= bytes.len() {
+        if &bytes[i..i + delim_bytes.len()] == delim_bytes {
+            positions.push(i);
+            i += delim_bytes.len();
+        } else {
+            i += 1;
+        }
+    }
+    if positions.is_empty() {
+        parts.push(Err("missing multipart boundary".to_string()));
+        return parts;
+    }
+    for win in positions.windows(2) {
+        let start = win[0] + delim_bytes.len();
+        let end = win[1];
+        let segment = &bytes[start..end];
+        // segment is `\r\n<headers>\r\n\r\n<data>\r\n` (or terminator)
+        let segment = segment.strip_prefix(b"\r\n").unwrap_or(segment);
+        let segment = segment.strip_suffix(b"\r\n").unwrap_or(segment);
+        // split headers / body
+        let Some(sep) = find_subseq(segment, b"\r\n\r\n") else {
+            parts.push(Err("malformed multipart segment".to_string()));
+            continue;
+        };
+        let header_bytes = &segment[..sep];
+        let data = segment[sep + 4..].to_vec();
+        let headers = String::from_utf8_lossy(header_bytes);
+        let mut name = None;
+        for line in headers.split("\r\n") {
+            if let Some(rest) = line
+                .to_ascii_lowercase()
+                .strip_prefix("content-disposition:")
+            {
+                let rest_orig = &line["content-disposition:".len()..];
+                let _ = rest;
+                for attr in rest_orig.split(';') {
+                    let attr = attr.trim();
+                    if let Some(v) = attr.strip_prefix("name=") {
+                        name = Some(v.trim().trim_matches('"').to_string());
+                    }
+                }
+            }
+        }
+        parts.push(Ok(MultipartPart { name, data }));
+    }
+    parts
+}
+
+fn find_subseq(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle)
 }
 
 fn header_get(headers: &HeaderMap, name: &str) -> Option<String> {

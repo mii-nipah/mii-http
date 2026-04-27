@@ -46,7 +46,7 @@ Exec: echo ok
     assert_eq!(ep.method, Method::Get);
     assert_eq!(ep.path, "/status");
     assert!(matches!(
-        ep.exec.pipeline.first(),
+        ep.exec.statements[0].first(),
         Some(ExecStage::Command { .. })
     ));
 }
@@ -251,7 +251,7 @@ QUERY guest?: /[a-zA-Z]+/
 Exec: echo Hello, [%name] [%guest]
 "#,
     );
-    let stages = &s.endpoints[0].exec.pipeline;
+    let stages = &s.endpoints[0].exec.statements[0];
     assert_eq!(stages.len(), 1);
     let tokens = match &stages[0] {
         ExecStage::Command { tokens, .. } => tokens,
@@ -272,7 +272,7 @@ BODY string
 Exec: $ | xargs echo
 "#,
     );
-    let stages = &s.endpoints[0].exec.pipeline;
+    let stages = &s.endpoints[0].exec.statements[0];
     assert_eq!(stages.len(), 2);
     assert!(matches!(
         stages[0],
@@ -346,7 +346,7 @@ HEADER X-Custom: /[a-z]+/
 Exec: echo [X=^X-Custom]
 "#,
     );
-    let stages = &s.endpoints[0].exec.pipeline;
+    let stages = &s.endpoints[0].exec.statements[0];
     let tokens = match &stages[0] {
         ExecStage::Command { tokens, .. } => tokens,
         _ => panic!(),
@@ -457,4 +457,65 @@ Exec: echo ok
     );
     let has_err = r.diags.iter().any(|d| d.kind == DiagKind::Error);
     assert!(has_err, "expected error for unknown setup directive");
+}
+
+#[test]
+fn parses_response_type_stream_adjective() {
+    let s = must_parse(
+        r#"
+GET /stream
+Response-Type stream text/plain
+Exec: echo hi
+"#,
+    );
+    let ep = &s.endpoints[0];
+    assert!(ep.response_stream);
+    assert_eq!(ep.response_type.as_deref(), Some("text/plain"));
+}
+
+#[test]
+fn parses_response_type_without_stream() {
+    let s = must_parse(
+        r#"
+GET /a
+Response-Type text/plain
+Exec: echo hi
+"#,
+    );
+    let ep = &s.endpoints[0];
+    assert!(!ep.response_stream);
+    assert_eq!(ep.response_type.as_deref(), Some("text/plain"));
+}
+
+#[test]
+fn parses_multiline_exec_block() {
+    let s = must_parse(
+        r#"
+POST /complex
+Response-Type text/plain
+Exec: <<<
+  echo "line 1"
+  echo "line 2"
+  echo "line 3"
+>>>
+"#,
+    );
+    let ep = &s.endpoints[0];
+    assert_eq!(ep.exec.statements.len(), 3);
+}
+
+#[test]
+fn rejects_unterminated_multiline_exec() {
+    let r = parse(
+        r#"
+POST /x
+Exec: <<<
+  echo "no closer"
+"#,
+    );
+    let has_err = r
+        .diags
+        .iter()
+        .any(|d| d.kind == DiagKind::Error && d.message.contains("Exec"));
+    assert!(has_err, "expected unterminated Exec error: {:?}", r.diags);
 }

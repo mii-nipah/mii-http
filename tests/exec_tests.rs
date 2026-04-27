@@ -2,7 +2,7 @@
 //! (group omission, interpolation).
 
 use bytes::Bytes;
-use mii_http::exec::{BodyValue, ExecContext, build_argv, run_pipeline};
+use mii_http::exec::{BodyValue, ExecContext, FormFieldValue, build_argv, run_pipeline};
 use mii_http::spec::{ExecStage, ExecToken, TextPart, ValueRef};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -174,7 +174,10 @@ fn build_argv_resolves_body_form_field() {
     let p = parse(r#"echo "{$.username}""#);
     let toks = cmd_tokens(&p[0]);
     let mut form = BTreeMap::new();
-    form.insert("username".to_string(), "alice".to_string());
+    form.insert(
+        "username".to_string(),
+        FormFieldValue::Text("alice".to_string()),
+    );
     let ctx = ExecContext {
         body: BodyValue::Form(form),
         ..Default::default()
@@ -202,7 +205,7 @@ async fn run_pipeline_uses_shell_for_spec_syntax() {
     let marker = dir.path().join("shell-redirection-worked");
     let pipeline = parse(&format!("printf worked > {}", marker.display()));
 
-    let output = run_pipeline(&pipeline, &ExecContext::default(), None)
+    let output = run_pipeline(std::slice::from_ref(&pipeline), &ExecContext::default(), None)
         .await
         .expect("run pipeline");
 
@@ -219,7 +222,7 @@ async fn run_pipeline_shell_quotes_request_interpolation() {
     let mut ctx = ExecContext::default();
     ctx.query.insert("name".into(), payload.clone());
 
-    let output = run_pipeline(&pipeline, &ctx, None)
+    let output = run_pipeline(std::slice::from_ref(&pipeline), &ctx, None)
         .await
         .expect("run pipeline");
 
@@ -235,7 +238,7 @@ async fn run_pipeline_shell_quotes_request_interpolation() {
 async fn run_pipeline_preserves_quoted_literal_as_one_shell_word() {
     let pipeline = parse(r#"printf %s "a;b""#);
 
-    let output = run_pipeline(&pipeline, &ExecContext::default(), None)
+    let output = run_pipeline(std::slice::from_ref(&pipeline), &ExecContext::default(), None)
         .await
         .expect("run pipeline");
 
@@ -251,7 +254,7 @@ async fn run_pipeline_materializes_binary_body_as_file_argument() {
         ..Default::default()
     };
 
-    let output = run_pipeline(&pipeline, &ctx, None)
+    let output = run_pipeline(std::slice::from_ref(&pipeline), &ctx, None)
         .await
         .expect("run pipeline");
 
@@ -269,7 +272,7 @@ async fn run_pipeline_timeout_kills_final_child() {
     ));
 
     let err = run_pipeline(
-        &pipeline,
+        std::slice::from_ref(&pipeline),
         &ExecContext::default(),
         Some(Duration::from_millis(30)),
     )
@@ -291,7 +294,7 @@ async fn run_pipeline_timeout_kills_prior_pipeline_children() {
     ));
 
     let err = run_pipeline(
-        &pipeline,
+        std::slice::from_ref(&pipeline),
         &ExecContext::default(),
         Some(Duration::from_millis(30)),
     )
@@ -301,4 +304,56 @@ async fn run_pipeline_timeout_kills_prior_pipeline_children() {
     assert!(err.contains("timed out"), "unexpected error: {err}");
     tokio::time::sleep(Duration::from_millis(350)).await;
     assert!(!marker.exists(), "timed-out pipeline child kept running");
+}
+
+#[tokio::test]
+async fn run_pipeline_supports_multiline_statements() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let f1 = dir.path().join("a");
+    let f2 = dir.path().join("b");
+    let s1 = mii_http::parse::exec::parse_exec(&format!("printf one > {}", f1.display()), 0).unwrap();
+    let s2 = mii_http::parse::exec::parse_exec(&format!("printf two > {}", f2.display()), 0).unwrap();
+    let statements = vec![s1, s2];
+    let out = run_pipeline(&statements, &ExecContext::default(), None)
+        .await
+        .expect("ran");
+    assert_eq!(out.status, 0);
+    assert_eq!(std::fs::read_to_string(&f1).unwrap(), "one");
+    assert_eq!(std::fs::read_to_string(&f2).unwrap(), "two");
+}
+
+#[tokio::test]
+async fn run_pipeline_materializes_binary_form_field() {
+    let pipeline = parse("cat [$.file]");
+    let mut form = BTreeMap::new();
+    form.insert(
+        "file".to_string(),
+        FormFieldValue::Binary(Bytes::from_static(b"\x00\x01\x02hello")),
+    );
+    let ctx = ExecContext {
+        body: BodyValue::Form(form),
+        ..Default::default()
+    };
+    let output = run_pipeline(std::slice::from_ref(&pipeline), &ctx, None)
+        .await
+        .expect("run pipeline");
+    assert_eq!(output.status, 0);
+    assert_eq!(output.stdout, b"\x00\x01\x02hello");
+}
+
+#[tokio::test]
+async fn run_pipeline_streaming_yields_chunks() {
+    use tokio::time::{Duration, timeout};
+    let pipeline = parse("printf hello");
+    let statements = vec![pipeline];
+    let mut streaming = mii_http::exec::run_pipeline_streaming(&statements, &ExecContext::default(), None)
+        .await
+        .expect("spawn streaming");
+    let mut got = Vec::new();
+    while let Ok(Some(chunk)) = timeout(Duration::from_secs(2), streaming.stdout_rx.recv()).await {
+        got.extend_from_slice(&chunk.expect("chunk"));
+    }
+    let completion = streaming.completion.await.expect("join").expect("ok");
+    assert_eq!(completion.status, 0);
+    assert_eq!(got, b"hello");
 }

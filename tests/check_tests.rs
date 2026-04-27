@@ -461,3 +461,40 @@ Exec: "{%cmd}" hello
         errs
     );
 }
+
+#[test]
+fn allows_binary_in_form_field() {
+    let s = parse_or_panic(
+        r#"
+POST /upload
+BODY form {
+  file: binary
+  name: /[a-z]+/
+}
+Exec: cat [$.file]
+"#,
+    );
+    let errs: Vec<_> = check(&s)
+        .into_iter()
+        .filter(|d| d.kind == DiagKind::Error)
+        .collect();
+    assert!(errs.is_empty(), "expected clean, got {:?}", errs);
+}
+
+#[test]
+fn allows_binary_form_field_via_stdin() {
+    let s = parse_or_panic(
+        r#"
+POST /upload
+BODY form {
+  file: binary
+}
+Exec: $.file | sha256sum
+"#,
+    );
+    let errs: Vec<_> = check(&s)
+        .into_iter()
+        .filter(|d| d.kind == DiagKind::Error)
+        .collect();
+    assert!(errs.is_empty(), "expected clean, got {:?}", errs);
+}

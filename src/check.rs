@@ -138,7 +138,7 @@ fn check_endpoint(ep: &Endpoint, _setup: &Setup, diags: &mut Vec<Diag>) {
         vars: var_names,
         ep,
     };
-    for stage in &ep.exec.pipeline {
+    for stage in ep.exec.all_stages() {
         match stage {
             ExecStage::Source { reference, span } => {
                 check_ref(reference, span, &scope, diags);
@@ -186,13 +186,14 @@ fn forbid_stdin_only_in_field(
 ) {
     // `string` and `json` (untyped) are allowed to be *declared* on any
     // field; they are reserved for stdin use, which is enforced at argv
-    // construction time by `check_argv_safety`. Only `binary`, which is
-    // body-only, is rejected at the declaration site.
-    if matches!(ty, TypeExpr::Binary) {
+    // construction time by `check_argv_safety`. `binary` is allowed only on
+    // top-level BODY or as a FORM field (where it is materialized to a
+    // temp file path when used as argv).
+    if matches!(ty, TypeExpr::Binary) && kind != "form field" {
         diags.push(Diag::error(
-            format!("`binary` type only allowed as BODY for {} `{}`", kind, name),
+            format!("`binary` type only allowed as BODY or FORM field for {} `{}`", kind, name),
             span.clone(),
-            "binary is allowed only on top-level BODY",
+            "binary is allowed only on top-level BODY or inside `BODY form { ... }`",
         ));
     }
 }

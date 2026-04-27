@@ -41,6 +41,8 @@ Exec: echo ok
 
 Required: method line, `Response-Type`, `Exec:`.
 
+`Response-Type` accepts an optional `stream` adjective: `Response-Type stream text/plain` makes the server emit the command's stdout as HTTP chunked transfer instead of buffering the full response.
+
 ### Path params
 
 `:name:type` in path:
@@ -77,7 +79,7 @@ list?: [TYPE]
 - `string` — stdin-only body
 - `json` — stdin-only body
 - typed JSON — via `BODY json { ... }`
-- `binary` — `BODY` only; passed as temp file path (or stdin)
+- `binary` — `BODY` or a field inside `BODY form { ... }`; passed as a temp file path (or stdin)
 - `form` — `BODY` only
 
 **Argv-safety rule (enforced by checker):** `string` and untyped `json` may be *declared* on any input, but they may **only reach the command via stdin**, never as an argv token. Use `[ ]` interpolation only with constrained types (int/float/uuid/range/union/regex). For untyped JSON bodies, declare a schema or pipe as stdin (`$ | cmd`).
@@ -117,6 +119,15 @@ list?: [TYPE]
    ```http
    Exec: $ | xargs echo
    ```
+
+4. **Multi-line form**: `Exec: <<<` opens a block closed by `>>>` on its own line. Each non-empty line is parsed as an independent pipeline statement; indentation is ignored.
+   ```http
+   Exec: <<<
+     echo "step one"
+     echo "step two for {%name}"
+   >>>
+   ```
+   Only the first statement may consume request stdin (`$ | …`). All statements share the same response stream.
 
 Missing optionals inside `"{...}"` → empty string. Missing optionals in `[ ]` → group dropped.
 
@@ -177,7 +188,7 @@ Exec: echo [%name] [@greeting]
 | Bare `%name`/`:id`/`^H`/`@v`/`$.x` outside `[ ]` and `"{...}"` | Warning: literal text. Wrap in `[ ]` or escape with `\`. |
 | `string`/untyped `json` field used as argv | Error. Move to stdin or constrain type. |
 | Untyped `BODY json` used as `[$.field]` | Error. Add schema or use `$` via stdin. |
-| `binary` declared anywhere except `BODY` | Error. |
+| `binary` declared anywhere except `BODY` or a `BODY form` field | Error. |
 | `VAR` from `[HEADER ...]` used as argv | Error. Use typed `HEADER`, or pipe via stdin. |
 | Reference to undeclared name (e.g. `[%foo]` no `QUERY foo`) | Error. |
 | Interpolated program name (`Exec: [@cmd] arg`) | Error. Must be literal. |
@@ -212,6 +223,30 @@ Notes:
 - `[%at]` constrained shell arg; regex blocks injection.
 - `[-vf scale=%width:-1]` = one shell word, one optional sigil. `width` omitted → whole `-vf …` group dropped.
 - Bearer token from `X-API-Key`, validated against `THUMBS_API_TOKEN` env.
+
+## Worked example: streaming + multipart upload
+
+Goal: receive a video plus a name field, transcode and stream the result to the client as it is produced.
+
+```http
+VERSION 1
+BASE /media
+MAX_BODY_SIZE 200mb
+TIMEOUT 5m
+
+POST /transcode
+Response-Type stream video/mp4
+BODY form {
+  name: /[a-zA-Z0-9_.-]+/
+  file: binary
+}
+Exec: ffmpeg -i [$.file] -f mp4 -movflags frag_keyframe+empty_moov pipe:1
+```
+
+Notes:
+
+- `BODY form { file: binary }` requires a `multipart/form-data` upload; `[$.file]` resolves to the temp-file path.
+- `Response-Type stream video/mp4` enables HTTP chunked transfer so the client gets bytes as `ffmpeg` writes them.
 
 ## Authoring workflow
 

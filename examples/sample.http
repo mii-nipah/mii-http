@@ -43,10 +43,10 @@ BODY json {
 Exec: echo title=[$.title] count=[$.count]
 
 GET /headers
-Response-Type text/plain
+Response-Type stream text/plain
 HEADER X-Custom-Header: /[a-zA-Z0-9_]+/
 HEADER X-Optional-Header?: /[a-zA-Z0-9_]+/
-Exec: echo X={^X-Custom-Header} O={^X-Optional-Header}
+Exec: echo [X=^X-Custom-Header] [O=^X-Optional-Header]
 
 GET /echovar
 Response-Type text/plain

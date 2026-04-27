@@ -77,6 +77,10 @@ pub struct Endpoint {
     /// Parsed segments of the path: literal or `:name` typed param.
     pub path_segments: Vec<PathSegment>,
     pub response_type: Option<String>,
+    /// `Response-Type stream <mime>` produces an HTTP chunked-transfer
+    /// response that streams the command's stdout to the client as it is
+    /// produced rather than buffering the full output.
+    pub response_stream: bool,
     pub query_params: Vec<NamedField>,
     pub headers: Vec<NamedField>,
     pub vars: Vec<VarDef>,
@@ -185,7 +189,17 @@ impl TypeExpr {
 pub struct ExecSpec {
     pub raw: String,
     pub span: Span,
-    pub pipeline: Vec<ExecStage>,
+    /// One or more pipeline statements. Single-line `Exec:` produces a
+    /// single statement; the multi-line `Exec: <<< ... >>>` form produces
+    /// one statement per non-blank line. Statements run sequentially in the
+    /// same shell invocation, sharing stdout to the client.
+    pub statements: Vec<Vec<ExecStage>>,
+}
+
+impl ExecSpec {
+    pub fn all_stages(&self) -> impl Iterator<Item = &ExecStage> {
+        self.statements.iter().flatten()
+    }
 }
 
 /// A pipeline stage: either a value source piped to next, or a command.

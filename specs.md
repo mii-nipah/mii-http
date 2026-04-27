@@ -113,6 +113,14 @@ BODY json {
 }
 ```
 
+Sometimes it's desirable for an endpoint to produce streamable results instead of an all-at-once response, for a lot of shell commands this is desirable. You can achieve this by using the `stream` adjective in the response type, for example:
+```http
+GET /stream
+Response-Type stream text/plain
+Exec: some_command --streaming-output
+```
+In which case the server will use HTTP chunked transfer to respond to the client.
+
 #### Exec
 The `Exec` field is a very important and specially careful aspect of your endpoint definition, as it defines a command that will be run in your system. The command will be executed in a shell, and to ensure the maximum security it will be properly sanitized and validated, and unsafe values must be intentional and conscious.
 
@@ -157,6 +165,18 @@ Exec will interpret direct references to body, path, params, headers, values in 
 String interpolations whose values are not defined (i.e. optionals) will be replaced with an empty string.
 Flags and positional arguments whose values are not defined will be omitted entirely.
 
+Execs can also be multiline for more complex commands and better readability, for example:
+```http
+POST /complex
+Response-Type text/plain
+Exec: <<<
+  echo "This is a complex command"
+  echo "It has multiple lines"
+  echo "And it can use interpolation like {%name}"
+>>>
+```
+Indentation for each line is ignored, so commands can be nicely indented in the specs file.
+
 #### Types
 Query parameters and body schemas can have types, they are:
 - int: an integer number
@@ -170,7 +190,9 @@ Query parameters and body schemas can have types, they are:
 - string: any string value, it can only be used for stdin to avoid the risk of command injection
 - json: any json value, it can only be used for stdin to avoid the risk of command injection
 - typed json: a json value that must conform to a specific schema defined in the specs, it can only be passed entirely to a command (outside of stdin) if all fields are also valid fields that accept this, and JSON path accesses are allowed with the same general rules
-- binary: any binary value, it can only be define for BODY, and will be passed to the command as a temporary file reference (or, if it's stdin, directly)
+- binary: any binary value, it can only be defined for BODY and FORM fields, the rules are:
+  * will be passed to the command directly if it's being used directly in stdin
+  * will be passed to the command as a file path in any other context (upload the file to a temporary location and pass the path)
 - form: can only be used with BODY, and makes the server expect fields to be defined
 
 ## commands

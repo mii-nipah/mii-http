@@ -132,6 +132,32 @@ Exec: echo username=[$.username] age=[$.age]
 
 `int`, `float`, `boolean`, `uuid`, `int(1..10)`, `float(0.0..1.0)`, unions like `red|green|blue`, regexes `/.../`, `string`, `json`, typed JSON schemas, `form`, `binary`. See [specs.md](specs.md) for the authoritative reference and the rules around which types may flow into argv vs. stdin only.
 
+`binary` is allowed both as a top-level `BODY` and as a field inside `BODY form { ... }` (uploaded via `multipart/form-data`). Outside of stdin, binary values are written to a temp file and the path is interpolated as a quoted shell word.
+
+### Streaming responses
+
+Prefix the response type with `stream` to stream the command's stdout to the client using HTTP chunked transfer instead of buffering the full output:
+
+```http
+GET /tail
+Response-Type stream text/plain
+Exec: tail -F /var/log/syslog
+```
+
+### Multi-line `Exec`
+
+For longer scripts, use the `<<< ... >>>` form. Each non-empty line becomes its own pipeline statement; indentation is ignored:
+
+```http
+POST /complex
+Response-Type text/plain
+Exec: <<<
+  echo "step one"
+  echo "step two for {%name}"
+  echo "done"
+>>>
+```
+
 ## CLI
 
 ```text
@@ -192,7 +218,7 @@ Source layout:
 - Request values interpolated with `[ … ]` or quoted-string `{ … }` are shell-quoted before execution.
 - Inputs are validated against their declared types before the command is invoked.
 - `string` and free `json` types are restricted to **stdin only**, so unconstrained text cannot become argv.
-- `binary` bodies are written to a temp file and the path is passed as argv (or streamed via stdin).
+- `binary` bodies and `binary` form fields are written to a temp file and the path is passed as argv (or streamed via stdin).
 - `MAX_BODY_SIZE`, `MAX_QUERY_PARAM_SIZE`, `MAX_HEADER_SIZE` and `TIMEOUT` are enforced at the request boundary.
 - `mii-http --check` highlights overly-permissive regexes (e.g. `/.*/`) and other risky patterns before they reach production.
 

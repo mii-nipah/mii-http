@@ -238,6 +238,7 @@ impl<'a> Parser<'a> {
             path: path_str,
             path_segments,
             response_type: None,
+            response_stream: false,
             query_params: Vec::new(),
             headers: Vec::new(),
             vars: Vec::new(),
@@ -245,7 +246,7 @@ impl<'a> Parser<'a> {
             exec: ExecSpec {
                 raw: String::new(),
                 span: 0..0,
-                pipeline: Vec::new(),
+                statements: Vec::new(),
             },
             span: header_span,
         };
@@ -269,7 +270,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        if endpoint.exec.raw.is_empty() {
+        if endpoint.exec.statements.is_empty() {
             self.err(
                 "endpoint missing Exec directive",
                 endpoint.span.clone(),
@@ -287,16 +288,82 @@ impl<'a> Parser<'a> {
         // Others use space separators (QUERY, HEADER, VAR, BODY).
         if let Some(rest) = body.strip_prefix("Response-Type") {
             let rest = rest.trim_start_matches([':', ' ', '\t']);
-            ep.response_type = Some(rest.trim().to_string());
+            let trimmed = rest.trim();
+            let (stream, ty) = if let Some(after) = trimmed.strip_prefix("stream") {
+                if after.is_empty() || after.starts_with(|c: char| c.is_whitespace()) {
+                    (true, after.trim().to_string())
+                } else {
+                    (false, trimmed.to_string())
+                }
+            } else {
+                (false, trimmed.to_string())
+            };
+            ep.response_stream = stream;
+            ep.response_type = Some(ty);
             return false;
         }
         if let Some(rest) = body.strip_prefix("Exec:") {
             let exec_off = offset + leading + "Exec:".len();
             let trim_off = rest.len() - rest.trim_start().len();
+            let value_after_colon = rest.trim_start();
+            // Multi-line form: `Exec: <<<` ... lines ... `>>>` on its own line.
+            if let Some(after_open) = value_after_colon.strip_prefix("<<<") {
+                let trailing = after_open.trim();
+                let opener_span_start = exec_off + trim_off;
+                if !trailing.is_empty() {
+                    self.err(
+                        "unexpected text after `<<<` on Exec line",
+                        opener_span_start..(opener_span_start + value_after_colon.len()),
+                        "the multi-line Exec opener must be alone on its line",
+                    );
+                }
+                let mut lines: Vec<(String, Span)> = Vec::new();
+                let mut closed = false;
+                let mut end_off = offset + text.len();
+                while let Some((line_text, line_off)) = self.peek() {
+                    self.cursor += 1;
+                    end_off = line_off + line_text.len();
+                    let trimmed_line = line_text.trim();
+                    if trimmed_line == ">>>" {
+                        closed = true;
+                        break;
+                    }
+                    if trimmed_line.is_empty() || trimmed_line.starts_with('#') {
+                        continue;
+                    }
+                    let lead = line_text.len() - line_text.trim_start().len();
+                    let span_start = line_off + lead;
+                    let span = span_start..(span_start + trimmed_line.len());
+                    lines.push((trimmed_line.to_string(), span));
+                }
+                if !closed {
+                    self.err(
+                        "unterminated multi-line Exec block",
+                        opener_span_start..(opener_span_start + 3),
+                        "missing closing `>>>` on its own line",
+                    );
+                }
+                let mut statements = Vec::new();
+                let mut raw_parts = Vec::new();
+                for (line, span) in lines {
+                    raw_parts.push(line.clone());
+                    match crate::parse::exec::parse_exec(&line, span.start) {
+                        Ok(stages) => statements.push(stages),
+                        Err(d) => self.diags.push(d),
+                    }
+                }
+                ep.exec = ExecSpec {
+                    raw: raw_parts.join("\n"),
+                    span: opener_span_start..end_off,
+                    statements,
+                };
+                ep.span.end = end_off;
+                return true;
+            }
             let raw = rest.trim().to_string();
             let span = (exec_off + trim_off)..(exec_off + trim_off + raw.len());
-            let pipeline = match crate::parse::exec::parse_exec(&raw, span.start) {
-                Ok(p) => p,
+            let statements = match crate::parse::exec::parse_exec(&raw, span.start) {
+                Ok(p) => vec![p],
                 Err(d) => {
                     self.diags.push(d);
                     Vec::new()
@@ -305,7 +372,7 @@ impl<'a> Parser<'a> {
             ep.exec = ExecSpec {
                 raw,
                 span,
-                pipeline,
+                statements,
             };
             ep.span.end = offset + text.len();
             return true;
