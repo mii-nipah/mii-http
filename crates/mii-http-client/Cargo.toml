@@ -1,10 +1,11 @@
 [package]
 name = "mii-http-client"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Generated Rust clients for mii-http specs."
 license = "BSD-3-Clause"
 repository = "https://github.com/mii-nipah/mii-http"
+readme = "README.md"
 
 [dependencies]
 bytes = "1"
